@@ -1,0 +1,296 @@
+name: social-media-scraper-harness
+description: >
+  约束 social-media-scraper skill 的完整执行流程。
+  覆盖从环境准备到最终 Excel 输出的全部阶段，确保 agent 严格按步骤执行。
+
+# ============================================================
+# 完整工作流定义
+# ============================================================
+#
+#  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+#  │ 1.环境准备   │────▶│ 2.登录检查   │────▶│ 3.抓取数据   │
+#  └─────────────┘     └─────────────┘     └─────────────┘
+#                            │                     │
+#                            │ 需要登录             │
+#                            ▼                     │
+#                      ┌─────────────┐             │
+#                      │ 2a.登录流程  │             │
+#                      └─────────────┘             │
+#                            │                     │
+#                            │ 登录完成             │
+#                            ▼                     ▼
+#                      ┌─────────────┐     ┌─────────────┐
+#                      │ 3.抓取数据   │────▶│ 4.批量分类   │
+#                      └─────────────┘     └─────────────┘
+#                                                │
+#                                                ▼
+#                                        ┌─────────────┐
+#                                        │ 5.生成Excel  │
+#                                        └─────────────┘
+#
+
+workflow:
+  # ── Phase 1: 环境准备 ──────────────────────────────────────
+  - phase: setup
+    description: 检查并安装依赖环境
+    entry_condition: 首次使用，或 --setup 参数
+    command: |
+      python skills/social-media-scraper/src/main.py --setup
+    expected_output: "环境检查通过！可以开始使用了。"
+    on_failure: STOP — 提示用户手动安装依赖
+    blocking: true
+    next: run
+
+  # ── Phase 2: 一键执行（推荐） ──────────────────────────────
+  - phase: run
+    description: 一条命令完成登录检查+自动登录+抓取，无需 agent 协调多步
+    entry_condition: 环境准备完成
+    sandbox_required: false  # 需要打开浏览器窗口
+    strategy: |
+      **推荐使用 --run，一条命令搞定全流程：**
+
+      - **链接 ≤ 20 条**：直接跑完
+        ```bash
+        python skills/social-media-scraper/src/main.py --run --input {input_excel_path}
+        ```
+
+      - **链接 > 20 条**：批次循环
+        ```bash
+        while true; do
+          output=$(python skills/social-media-scraper/src/main.py --run --input {input_excel_path} --resume --batch-size 20 2>&1)
+          echo "$output"
+          if echo "$output" | grep -q "所有链接已完成抓取"; then
+            break
+          fi
+        done
+        ```
+
+      **--run 自动处理：**
+      1. 检查各平台 Cookie 是否存在
+      2. 缺失的平台 → 自动打开浏览器
+      3. 用户在浏览器中登录 → 自动检测登录成功（URL 变化）
+      4. 自动保存 Cookie → 自动开始抓取
+      5. 无需 agent 协调多步命令，无需用户文字确认
+    blocking: true
+
+  # ── Phase 3: 抓取数据 ──────────────────────────────────────
+  - phase: scrape
+    description: 运行 scraper 抓取所有 URL 的评论和正文
+    entry_condition: Cookie 就绪（login_check 通过或 login_flow 完成）
+    strategy: |
+      **抓取策略（根据链接数量自动选择）：**
+
+      先统计输入 Excel 中的链接总数，再决定执行方式：
+
+      - **链接 ≤ 20 条**：直接一次跑完
+        ```bash
+        python skills/social-media-scraper/src/main.py --input {input_excel_path}
+        ```
+
+      - **链接 > 20 条**：使用批次循环，每轮 20 条，避免 Bash 超时
+        ```bash
+        while true; do
+          output=$(python skills/social-media-scraper/src/main.py --input {input_excel_path} --resume --batch-size 20 2>&1)
+          echo "$output"
+          if echo "$output" | grep -q "所有链接均已抓取完成"; then
+            break
+          fi
+        done
+        ```
+
+      **判断依据：** 20 条链接约需 8 分钟，Bash 后台超时 10 分钟，留有余量。
+      链接数多时切勿一次性跑完，否则会超时丢失数据。
+    expected_output: ===RAW_RESULTS_START=== ... JSON ... ===RAW_RESULTS_END===
+    output_format: JSON 数组，每项包含 serial, title, url, platform, status, error, post_content, comments
+    constraints:
+      - scraper 运行期间 agent 不得做任何分类操作
+      - 必须等待进程结束并获取完整 JSON 输出
+      - 抓取失败的项 status="失败"，不参与后续分类
+      - 推荐使用 --batch-size 避免 Bash 超时，每轮抓取数量应小于 10min / 单条耗时
+    on_failure: 记录失败项，继续处理成功项
+    next: classify
+    blocking: true
+
+  # ── Phase 4: 批量分类 ──────────────────────────────────────
+  - phase: classify
+    description: Agent 对所有成功抓取的结果进行批量分类
+    entry_condition: scrape 阶段完成，获取到完整 JSON 结果
+    input: scrape 阶段输出的 JSON 数组（仅 status="成功" 的项）
+    processing:
+      - step: read_all
+        description: 先通读所有抓取结果，了解数据全貌
+        constraint: 禁止读一条分一条，必须先全部读完
+
+      - step: define_tags
+        description: 根据数据内容确定统一的标签体系
+        constraint: 标签命名全局一致，不得出现语义相同但命名不同的标签
+        output: 标签列表（如：装修、服务、价格、位置、卫生、设施）
+
+      - step: classify_content
+        description: 对每条数据标注情感偏向、标签、是否与其他酒店比较
+        fields:
+          - 情感偏向: 正面 / 负面 / 中性
+          - 标签: 从标签体系中选取，无标签填"/"
+          - 是否与其他酒店比较: 是 / 否
+        constraint: 分类结果暂存在内存中，不写文件
+
+    constraints:
+      - 禁止边抓取边分类（必须等 scrape 完成）
+      - 禁止逐条分类（必须批量处理）
+      - 标签体系必须在分类前确定，分类过程中不得随意新增标签
+    next: generate_excel
+    blocking: true
+
+  # ── Phase 5: 生成 Excel ────────────────────────────────────
+  - phase: generate_excel
+    description: Agent 使用 openpyxl 生成最终 Excel 文件
+    entry_condition: classify 阶段完成，所有数据已标注
+    output_file: output/scrape_result_{YYYYMMDD_HHMMSS}.xlsx
+    sheets:
+      - name: 原始底表
+        source: 直接复制输入 Excel 的内容，不做任何修改
+        headers: [序号, 标题, 链接, 来源, 平台, 日期, 作者]
+
+      - name: 评论+标签+情感
+        source: scrape 输出的 comments + classify 输出的分类字段
+        headers: [序号, 情感偏向, 标签, 是否与其他酒店比较, 内容, 平台]
+        rules:
+          - 每条评论占一行
+          - 序号全局自增
+          - 平台使用中文：抖音 / 小红书 / 微博
+          - 情感偏向、标签、是否与其他酒店比较 必须填写，不得留空
+
+      - name: 正文内容+标签+情感
+        source: scrape 输出的 post_content + classify 输出的分类字段
+        headers: [排序, 标题, 平台, 内容摘要, 情感偏向, 标签, 是否与其他酒店比较, 原文/评论链接]
+        rules:
+          - 每个帖子占一行（仅 status="成功" 且有 post_content 的项）
+          - 排序全局自增
+          - 平台使用中文：抖音 / 小红书 / 微博
+          - 情感偏向、标签、是否与其他酒店比较 必须填写，不得留空
+
+    constraints:
+      - Sheet 名称和表头必须完全匹配，不得增删列
+      - 禁止在 classify 未完成时开始生成
+    blocking: false
+
+# ============================================================
+# 约束规则
+# ============================================================
+
+rules:
+  # ── 流程顺序约束 ────────────────────────────────────────────
+  - id: phase-order
+    description: 必须按 setup → login_check → scrape → classify → generate_excel 顺序执行
+    enforcement: hard
+    check: |
+      每个阶段的 entry_condition 必须满足后才能开始。
+      禁止跳过阶段或乱序执行。
+    violation_message: "违规：阶段执行顺序错误。请严格按照工作流顺序执行。"
+
+  - id: scrape-complete-before-classify
+    description: 必须等所有 URL 抓取完成后才能开始分类
+    enforcement: hard
+    check: |
+      只有当 scraper 进程结束并输出 ===RAW_RESULTS_END=== 后，才可进入 classify 阶段。
+      scraper 运行期间不得做任何分类操作。
+    violation_message: "违规：抓取尚未完成就开始分类。请等待抓取结束后再处理。"
+
+  - id: classify-complete-before-output
+    description: 必须等所有数据分类完成后才能生成 Excel
+    enforcement: hard
+    check: |
+      generate_excel 阶段的 entry_condition 是 classify 完成。
+      禁止先生成 Excel 再回头补填分类字段。
+    violation_message: "违规：分类未完成就生成 Excel。请先完成所有数据的分类。"
+
+  - id: no-piecemeal-classification
+    description: 禁止逐条抓取逐条分类
+    enforcement: hard
+    check: |
+      agent 不得在每条 URL 抓取成功后立即进行分类。
+      必须等全部 URL 抓取结束后，一次性批量分类。
+    violation_message: "违规：检测到逐条分类行为。请等所有 URL 抓取完成后批量分类。"
+
+  # ── 登录约束 ────────────────────────────────────────────────
+  - id: login-confirmation-gate
+    description: 必须等用户确认登录成功后才能保存 Cookie
+    enforcement: hard
+    check: |
+      login_save 命令只能在用户明确确认（如"登录成功"）后执行。
+      禁止自动保存或超时保存。
+    violation_message: "违规：未等用户确认就保存 Cookie。请等待用户确认登录成功。"
+
+  - id: login-before-scrape
+    description: 抓取前必须确保 Cookie 就绪
+    enforcement: hard
+    check: |
+      scrape 阶段开始前，目标平台的 Cookie 文件必须存在。
+      如果缺失，必须先执行 login_flow。
+    violation_message: "违规：Cookie 缺失就开始抓取。请先完成登录流程。"
+
+  - id: login-no-sandbox
+    description: 登录流程必须禁用沙箱
+    enforcement: hard
+    check: |
+      执行 --login-open 和 --login 命令时，必须在 Bash 工具中设置 dangerouslyDisableSandbox: true。
+      沙箱模式会阻止 Playwright 打开可见的浏览器窗口，导致用户无法手动登录。
+    violation_message: "违规：登录命令未禁用沙箱。Playwright 需要打开浏览器窗口，请设置 dangerouslyDisableSandbox: true。"
+
+  # ── 分类质量约束 ────────────────────────────────────────────
+  - id: consistent-tags
+    description: 标签命名必须全局一致
+    enforcement: soft
+    check: |
+      agent 在分类时应先通读所有数据，确定统一的标签体系后再批量标注。
+      不得出现语义相同但命名不同的标签（如"装修"和"装潢"）。
+    violation_message: "警告：发现不一致的标签命名。请统一标签体系后重新分类。"
+
+  - id: classify-batch-read-first
+    description: 分类前必须先通读所有数据
+    enforcement: hard
+    check: |
+      classify 阶段必须先执行 read_all 步骤（通读全部数据），
+      再执行 define_tags 步骤（确定标签体系），
+      最后执行 classify_content 步骤（批量标注）。
+      禁止跳过 read_all 直接分类。
+    violation_message: "违规：未通读全部数据就开始分类。请先了解数据全貌。"
+
+  # ── 输出格式约束 ────────────────────────────────────────────
+  - id: output-format-compliance
+    description: Excel 输出必须严格遵循标准格式
+    enforcement: hard
+    check: |
+      输出 Excel 必须包含 3 个 Sheet，名称和表头完全匹配：
+      1. 原始底表
+      2. 评论+标签+情感
+      3. 正文内容+标签+情感
+      不得增删列、改名。
+    violation_message: "违规：Excel 输出格式不符合标准。请严格按照 harness.yaml 定义的格式生成。"
+
+  - id: no-empty-classification
+    description: 分类字段不得留空
+    enforcement: hard
+    check: |
+      生成 Excel 时，情感偏向、标签、是否与其他酒店比较 三列必须填写。
+      无标签填"/"，不得留空单元格。
+    violation_message: "违规：分类字段存在空白。请确保所有单元格已填写。"
+
+  # ── Scraper 纯净性约束 ──────────────────────────────────────
+  - id: scraper-purity
+    description: Scraper 不做分类，只返回原始数据
+    enforcement: hard
+    check: |
+      scraper 代码（src/ 目录下）不得包含任何情感分析、标签生成、内容分类逻辑。
+      这些职责完全由 agent 承担。scraper 的输出必须是原始的 nickname + content 数据。
+    violation_message: "违规：scraper 代码中不应包含分类逻辑。请移除并由 agent 处理。"
+
+  # ── 超时恢复约束 ──────────────────────────────────────────
+  - id: timeout-resume
+    description: Bash 超时中断后必须使用 --resume 继续
+    enforcement: hard
+    check: |
+      如果 scrape 阶段因 Bash 工具超时（前台 2min / 后台 10min）被中断，
+      再次执行时必须使用 --resume 参数，否则已完成的抓取结果会丢失。
+      scraper 支持 checkpoint 增量保存，每次 URL 抓完后立即写入 checkpoint 文件。
+    violation_message: "违规：超时中断后未使用 --resume，可能导致已抓取数据丢失。"

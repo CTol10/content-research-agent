@@ -1,0 +1,5 @@
+# 评论抓取工具配置文件
+# 复制此文件为 config.ini，填入你的 API Key
+
+# MiMo API Key（用于内容标签分类 + 视频理解，不填则跳过对应功能）
+MIMO_API_KEY=

@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+dist.zip
+*.spec.bak
+cookies/
+output/
+logs/
+config.ini
+_check_*.json
+
+# Test files
+test_*.py
+tests/
+*_test.py
