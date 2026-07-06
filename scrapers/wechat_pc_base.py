@@ -7,6 +7,7 @@ specific scraping flows for 公众号 and 视频号.
 """
 import json
 import logging
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -40,6 +41,7 @@ class WechatPcBaseScraper:
         self.ocr = WechatOcr()
         self._profile: dict = {}
         self._rect: WindowRect | None = None
+        self._scrape_count: int = 0
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -49,6 +51,8 @@ class WechatPcBaseScraper:
             raise RuntimeError(
                 "找不到微信窗口。请确保微信 PC 客户端已启动并登录。"
             )
+        # Ensure window is on the primary monitor for OCR screenshots
+        self.window_mgr.move_to_primary_screen()
         self._rect = self.window_mgr.get_rect()
         logger.info(
             f"[{self.platform_name}] WeChat window: "
@@ -57,6 +61,12 @@ class WechatPcBaseScraper:
         )
         self._profile = self._load_profile()
         logger.info(f"[{self.platform_name}] Loaded profile: {self._profile_name}")
+
+        if not self._profile or "wechat_main" not in self._profile:
+            raise RuntimeError(
+                "微信坐标配置为空或不完整。\n"
+                "请先运行坐标校准工具: python main.py --wechat-calibrate"
+            )
 
     def stop(self) -> None:
         """No cleanup needed for PC approach."""
@@ -219,6 +229,90 @@ class WechatPcBaseScraper:
         """Screenshot a region and OCR extract all text lines."""
         path = self.screenshot_region(section, key, name)
         return self.ocr.extract_text(path)
+
+    def ocr_region_with_boxes(
+        self, section: str, key: str, name: str
+    ) -> list[dict]:
+        """Screenshot a region and OCR with bounding-box positions.
+
+        Each dict has {text, cx, cy, top, bottom, left, right}
+        where cx/cy are relative to the screenshot image.
+        """
+        path = self.screenshot_region(section, key, name)
+        return self.ocr.extract_text_with_boxes(path)
+
+    def find_expand_buttons(
+        self, section: str, key: str, name: str = "expand_scan"
+    ) -> list[dict]:
+        """Find all '展开' / 'N条回复' buttons in a region.
+
+        Returns list of dicts with {text, screen_x, screen_y},
+        sorted from bottom to top so clicks don't disrupt later targets.
+        """
+        region_left, region_top, region_w, region_h = \
+            self.resolve_region(section, key)
+        items = self.ocr_region_with_boxes(section, key, name)
+
+        expand_pattern = re.compile(r"展开|\d*条回复")
+        buttons = []
+        for item in items:
+            if expand_pattern.search(item["text"]):
+                buttons.append({
+                    "text": item["text"],
+                    "screen_x": region_left + item["cx"],
+                    "screen_y": region_top + item["cy"],
+                })
+
+        # Sort bottom-to-top: higher screen_y first
+        buttons.sort(key=lambda b: -b["screen_y"])
+        return buttons
+
+    def expand_all_in_region(
+        self,
+        section: str,
+        key: str,
+        max_rounds: int = 5,
+        scroll_clicks: int = -2,
+    ) -> int:
+        """Click all '展开' buttons in a region, scrolling between rounds.
+
+        Returns the total number of buttons clicked.
+        """
+        total_clicked = 0
+
+        for round_num in range(max_rounds):
+            buttons = self.find_expand_buttons(
+                section, key, f"expand_scan_{round_num:02d}"
+            )
+            if not buttons:
+                logger.debug(
+                    f"[{self.platform_name}] expand: no more buttons "
+                    f"after {round_num} rounds"
+                )
+                break
+
+            logger.info(
+                f"[{self.platform_name}] expand round {round_num+1}: "
+                f"{len(buttons)} buttons"
+            )
+            for btn in buttons:
+                logger.debug(
+                    f"  click '{btn['text']}' at ({btn['screen_x']}, {btn['screen_y']})"
+                )
+                self.click_point(btn["screen_x"], btn["screen_y"], f"展开:{btn['text']}")
+                time.sleep(0.3)
+
+            total_clicked += len(buttons)
+            time.sleep(0.8)  # Wait for expansion animation
+
+            # Scroll to reveal more hidden buttons
+            self.scroll_at_key(section, "article_scroll_start", clicks=scroll_clicks)
+            time.sleep(1.0)
+
+        logger.info(
+            f"[{self.platform_name}] expand done: {total_clicked} total clicks"
+        )
+        return total_clicked
 
     # ── Window refresh ───────────────────────────────────────────
 

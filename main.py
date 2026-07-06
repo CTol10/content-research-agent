@@ -891,6 +891,8 @@ def main():
     parser.add_argument("--no-video", action="store_true", help="跳过视频口播处理（不下载视频、不转录）")
     parser.add_argument("--wechat-mode", default="pc", choices=["pc", "browser", "auto"],
                         help="微信操作模式: pc(桌面相对坐标,默认) browser(浏览器) auto(自动选择)")
+    parser.add_argument("--wechat-calibrate", action="store_true",
+                        help="校准微信PC桌面坐标（交互式点击记录UI元素位置）")
     args = parser.parse_args()
 
     if not args.setup:
@@ -913,6 +915,13 @@ def main():
     import config
     config.COOKIE_DIR.mkdir(parents=True, exist_ok=True)
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Handle --wechat-calibrate (before any run/login flow)
+    if args.wechat_calibrate:
+        from scrapers.wechat_calibrator import WechatCalibrator
+        calibrator = WechatCalibrator()
+        ok = calibrator.calibrate_all()
+        sys.exit(0 if ok else 1)
 
     if getattr(sys, 'frozen', False):
         print("=" * 60)

@@ -183,6 +183,56 @@ class WechatWindowManager:
         except Exception as e:
             logger.warning(f"[window] Failed to normalize size: {e}")
 
+    def move_to_primary_screen(self) -> None:
+        """Move the WeChat window onto the primary monitor if it is off-screen.
+
+        This is necessary because pyautogui.screenshot(region=...) only
+        captures the primary monitor on Windows. If the WeChat window is
+        on a secondary monitor, OCR screenshots return black pixels.
+        """
+        if not self._hwnd:
+            logger.warning("[window] No window to move")
+            return
+
+        try:
+            import ctypes
+
+            # Get primary monitor work area
+            SPI_GETWORKAREA = 0x0030
+            class RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+            work_area = RECT()
+            ctypes.windll.user32.SystemParametersInfoW(
+                SPI_GETWORKAREA, 0, ctypes.byref(work_area), 0
+            )
+
+            rect = self.get_rect()
+
+            # Check if window is significantly off the primary monitor
+            if rect.left >= work_area.left and rect.left < work_area.right:
+                logger.debug("[window] Window already on primary monitor")
+                return
+
+            # Move window to top-left of primary monitor (with small offset)
+            new_left = work_area.left + 50
+            new_top = work_area.top + 50
+            user32.SetWindowPos(
+                self._hwnd, None,
+                new_left, new_top, rect.width, rect.height,
+                0x0000,  # No special flags
+            )
+            logger.info(
+                f"[window] Moved window from ({rect.left},{rect.top}) "
+                f"to primary monitor ({new_left},{new_top})"
+            )
+        except Exception as e:
+            logger.warning(f"[window] Failed to move to primary screen: {e}")
+
     @property
     def is_found(self) -> bool:
         return self._hwnd is not None

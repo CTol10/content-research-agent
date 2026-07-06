@@ -51,8 +51,20 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
             # Step 3: Wait for article content to load
             time.sleep(5)
 
-            # Step 4: Scroll to load comments
-            self._scroll_to_load_comments()
+            # 文章打开后微信窗口会在右侧弹出侧边面板，窗口变宽，需要刷新尺寸
+            self.refresh_rect()
+            logger.debug(
+                f"[wechat] After article open, window: "
+                f"({self._rect.left}, {self._rect.top}) "
+                f"{self._rect.width}x{self._rect.height}"
+            )
+
+            # Step 3.5: Click comment icon to expand comment section
+            self.click_key("official", "comment_icon", "评论区图标")
+            time.sleep(1.5)
+
+            # Step 4: Scroll + expand in one pass
+            self._scroll_and_expand_comments()
 
             # Step 5: Extract comments via OCR
             comments = self._extract_comments()
@@ -87,40 +99,74 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
         self.click_key("wechat_main", "result_open_entry", "搜索结果")
         time.sleep(5)
 
-    # ── Scrolling ────────────────────────────────────────────────
+    # ── Scrolling + Expand ─────────────────────────────────────
 
-    def _scroll_to_load_comments(self, max_scrolls: int = 20) -> None:
-        """Scroll down to load lazy-loaded comments."""
-        prev_comment_count = 0
+    def _scroll_and_expand_comments(self, max_scrolls: int = 40) -> None:
+        """Scroll through comments and click '展开/x条回复' buttons as we go.
+
+        Clicks inside the comment panel once to grab focus, then scrolls
+        one screen-height per iteration. OCR scans for expand buttons
+        after each scroll and clicks them from bottom to top.
+        """
+        prev_line_count = 0
         no_change_count = 0
+        total_expanded = 0
+
+        region_left, region_top, region_w, region_h = \
+            self.resolve_region("official", "comment_region")
+        focus_x = region_left + region_w // 2
+        focus_y = region_top + region_h // 2
+
+        # One click to focus the comment panel
+        pyautogui.click(focus_x, focus_y)
+        time.sleep(0.5)
 
         for i in range(max_scrolls):
-            # Scroll down
-            self.scroll_at_key("official", "article_scroll_start", clicks=-3)
-            time.sleep(1.5)
+            # Scroll one full screen (PageDown key)
+            pyautogui.press("pagedown")
+            time.sleep(1.0)
 
-            # Screenshot comment region to check progress
+            # Check OCR line count for scroll-stop heuristic
             try:
                 lines = self.ocr_region_lines(
-                    "official", "comment_region", f"scroll_check_{i:02d}"
+                    "official", "comment_region", f"scroll_{i:02d}"
                 )
                 current_count = len(lines)
             except Exception:
                 current_count = 0
 
-            if current_count == prev_comment_count:
+            # Check for expand buttons in current viewport
+            buttons = self.find_expand_buttons(
+                "official", "comment_region", f"expand_{i:02d}"
+            )
+            if buttons:
+                logger.info(
+                    f"[wechat] Scroll {i+1}: found {len(buttons)} expand buttons"
+                )
+                for btn in buttons:  # bottom-to-top (already sorted)
+                    self.click_point(
+                        btn["screen_x"], btn["screen_y"],
+                        f"展开:{btn['text']}",
+                    )
+                    time.sleep(0.3)
+                total_expanded += len(buttons)
+                time.sleep(0.8)
+
+            if current_count == prev_line_count:
                 no_change_count += 1
-                if no_change_count >= 3:
+                if no_change_count >= 5 and not buttons and i >= 10:
                     logger.debug(
-                        f"[wechat] No new content after {no_change_count} scrolls"
+                        f"[wechat] Stable at {current_count} lines, "
+                        f"no expand buttons — done"
                     )
                     break
             else:
                 no_change_count = 0
-            prev_comment_count = current_count
+            prev_line_count = current_count
 
             logger.debug(
-                f"[wechat] Scroll {i+1}/{max_scrolls}, OCR lines: {current_count}"
+                f"[wechat] Scroll {i+1}/{max_scrolls}: "
+                f"OCR={current_count} lines, expanded={total_expanded}"
             )
 
     # ── Comment extraction ───────────────────────────────────────
@@ -130,7 +176,15 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
         comments = []
         seen = set()
 
-        # Multiple scroll + OCR cycles to capture all comments
+        region_left, region_top, region_w, region_h = \
+            self.resolve_region("official", "comment_region")
+        focus_x = region_left + region_w // 2
+        focus_y = region_top + region_h // 2
+
+        # One click to focus, then scroll through
+        pyautogui.click(focus_x, focus_y)
+        time.sleep(0.5)
+
         prev_count = 0
         no_change_count = 0
 
@@ -152,9 +206,9 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
                 no_change_count = 0
             prev_count = len(comments)
 
-            # Scroll to load more
-            self.scroll_at_key("official", "article_scroll_start", clicks=-3)
-            time.sleep(1.5)
+            # Scroll one full screen
+            pyautogui.press("pagedown")
+            time.sleep(1.0)
 
         return comments
 
