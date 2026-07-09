@@ -40,7 +40,7 @@ def clean_nickname(line: str) -> str:
     Strips: time suffixes, province names, "作者"/"V" markers.
     """
     # Remove time suffixes
-    line = re.sub(r'\d+天前|\d+小时前|\d+分钟前|刚刚', '', line)
+    line = re.sub(r'\d+天前|\d+小时前|\d+分钟前|刚刚|昨天|前天', '', line)
     # Remove Chinese province/region names
     line = re.sub(
         r'浙江|广东|北京|上海|江苏|山东|四川|河南|湖北|湖南|福建|安徽|'
@@ -52,6 +52,40 @@ def clean_nickname(line: str) -> str:
     return line.strip()
 
 
+def clean_comment_content(text: str) -> str:
+    """Strip metadata noise from OCR comment content.
+
+    Removes "作者赞过", time markers, province names, reply counts,
+    like counts, ad markers, and other UI artifacts that OCR may pick up.
+    """
+    # Remove "作者赞过"
+    text = text.replace('作者赞过', '')
+    # Remove ad markers
+    text = re.sub(r'\b广告\s*v?\b', '', text)
+    # Remove time markers within content
+    text = re.sub(r'\d+天前|\d+小时前|\d+分钟前|刚刚|昨天|前天', '', text)
+    # Remove province names (leaked from adjacent comment headers)
+    text = re.sub(
+        r'浙江|广东|北京|上海|江苏|山东|四川|河南|湖北|湖南|福建|安徽|'
+        r'辽宁|重庆|天津|河北|山西|吉林|黑龙江|江西|广西|海南|贵州|云南|'
+        r'西藏|陕西|甘肃|青海|宁夏|新疆|内蒙古', '', text
+    )
+    # Remove reply count markers ("4条回复", "7条回复v" etc.)
+    text = re.sub(r'\d+条回复\s*v?', '', text)
+    # Remove isolated like counts (standalone 1-3 digit numbers)
+    text = re.sub(r'\b\d{1,3}\b', '', text)
+    # Remove standalone "V" marker
+    text = re.sub(r'\bV\b', '', text)
+    # Remove ad-like phrases
+    text = re.sub(r'低至[\d.]+元.*?(?:\s|$)', '', text)
+    text = re.sub(r'先运后付', '', text)
+    # Collapse whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    # Remove leading/trailing punctuation noise
+    text = text.strip('，,.。、· \t')
+    return text
+
+
 def parse_ocr_comments(lines: list[str]) -> list[tuple[str, str]]:
     """Parse OCR output lines into (nickname, comment_text) pairs.
 
@@ -60,8 +94,15 @@ def parse_ocr_comments(lines: list[str]) -> list[tuple[str, str]]:
       - Author caption block (skipped on first occurrence)
       - Commenter info line: nickname + time/location markers
       - Comment content line(s)
-      - "回复" button (skipped)
+      - "回复" / "作者赞过" / "写留言" buttons (skipped)
     """
+    # Metadata lines to skip (not comment content)
+    _SKIP_CONTENT = frozenset({
+        "回复", "评论", "写留言", "作者赞过",
+        "视频号", "搜索", "添加评论", "暂无评论",
+        "广告", "进入小程序",
+    })
+
     comments = []
     skip_author_caption = True
     i = 0
@@ -69,13 +110,13 @@ def parse_ocr_comments(lines: list[str]) -> list[tuple[str, str]]:
     while i < len(lines):
         line = lines[i]
 
-        # Skip header/navigation text ("评论 4" count header, not "评论者..." nicknames)
-        if re.match(r'^评论\s*\d', line) or line == "回复" or line in ("视频号", "搜索"):
+        # Skip header / navigation / UI text
+        if re.match(r'^评论\s*\d', line) or line in _SKIP_CONTENT:
             i += 1
             continue
 
         # Detect commenter info line: has time marker or author/V markers
-        has_time = bool(re.search(r'\d+天前|\d+小时前|\d+分钟前|刚刚', line))
+        has_time = bool(re.search(r'\d+天前|\d+小时前|\d+分钟前|刚刚|昨天|前天', line))
         is_author = "作者" in line
         is_commenter = is_author or "V" in line or has_time
 
@@ -87,7 +128,7 @@ def parse_ocr_comments(lines: list[str]) -> list[tuple[str, str]]:
                 while i < len(lines):
                     next_line = lines[i]
                     if re.search(
-                        r'\d+天前|\d+小时前|\d+分钟前|刚刚', next_line
+                        r'\d+天前|\d+小时前|\d+分钟前|刚刚|昨天|前天', next_line
                     ) and "作者" not in next_line:
                         break
                     i += 1
@@ -96,25 +137,108 @@ def parse_ocr_comments(lines: list[str]) -> list[tuple[str, str]]:
             # Extract nickname
             nickname = clean_nickname(line)
 
-            # Collect content lines (until next commenter info or end marker)
+            # Collect content lines (until next commenter info or UI marker)
             content_lines = []
             i += 1
             while i < len(lines):
                 next_line = lines[i]
-                if re.search(r'\d+天前|\d+小时前|\d+分钟前|刚刚', next_line):
+                # Stop at next commenter
+                if re.search(r'\d+天前|\d+小时前|\d+分钟前|刚刚|昨天|前天', next_line):
                     break
-                if next_line in ("回复", "评论") or re.match(r'^评论\s*\d', next_line):
-                    break
+                # Stop at UI markers
+                if next_line in _SKIP_CONTENT or re.match(r'^评论\s*\d', next_line):
+                    i += 1
+                    continue
                 content_lines.append(next_line)
                 i += 1
 
-            content = " ".join(content_lines).strip()
+            content = clean_comment_content(" ".join(content_lines))
             if content and nickname:
                 comments.append((nickname, content))
         else:
             i += 1
 
     return comments
+
+
+# ── Cross-screen fragment splicing ────────────────────────────────
+
+_MIN_OVERLAP = 8  # minimum chars for tail↔head overlap to be spliced
+
+
+def _try_splice(a: str, b: str) -> str | None:
+    """Try to splice two same-nickname comment fragments into one.
+
+    ``a`` is a fragment from an earlier screen (seen first), ``b`` is
+    from a later screen.  Returns the spliced result or None when the
+    two fragments appear to be *different* comments by the same person
+    (no meaningful overlap).
+
+    Merging rules (in order):
+      1. a == b          → pure dedup
+      2. b starts with a → b is a superset (comment short enough to fit
+           both screens fully, later OCR is better)
+      3. a ends with b   → a already contains b
+      4. a's tail overlaps b's head (>={_MIN_OVERLAP} chars) → splice
+    """
+    a, b = a.strip(), b.strip()
+    if not a or not b:
+        return None
+    if a == b:
+        return a
+    if b.startswith(a):
+        return b
+    if a.endswith(b):
+        return a
+
+    # Find the longest overlap: a's suffix == b's prefix
+    max_check = min(len(a), len(b)) - 1
+    for k in range(max_check, _MIN_OVERLAP - 1, -1):
+        if a[-k:] == b[:k]:
+            return a + b[k:]
+
+    return None
+
+
+def merge_comment_fragments(
+    pairs: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Merge cross-screen fragments of the same comment.
+
+    Walks ``pairs`` in screen order.  For each (nickname, content),
+    looks back at the most-recently-appended entry with the same
+    nickname and tries to splice the new fragment into it via
+    :func:`_try_splice`.  Spliced entries replace the old one when the
+    result is longer; otherwise the fragment is appended as a genuinely
+    new comment.
+    """
+    result: list[tuple[str, str]] = []
+
+    for nick, content in pairs:
+        merged = False
+        # Scan result backwards — the most recent same-nickname entry
+        # is the one that may be a split fragment of the same comment
+        # (N's clipped tail is immediately before N+1's head in
+        # screen-order pairs).
+        for j in range(len(result) - 1, -1, -1):
+            rnick, rcontent = result[j]
+            if rnick != nick:
+                continue
+            spliced = _try_splice(rcontent, content)
+            if spliced is not None:
+                # Replace with spliced version only when it's longer;
+                # always mark as merged (skip append) when spliceable.
+                if len(spliced) > len(rcontent):
+                    result[j] = (rnick, spliced)
+                merged = True
+                break
+            # Stop scanning once we find same-nickname — no need to
+            # look further back (that's an earlier distinct comment).
+            break
+        if not merged:
+            result.append((nick, content))
+
+    return result
 
 
 class WechatOcr:
@@ -134,6 +258,47 @@ class WechatOcr:
         if not result:
             return []
         return [line[1].strip() for line in result if line[1].strip()]
+
+    def extract_text_with_boxes(self, image_path: str | Path) -> list[dict]:
+        """Run OCR and return text WITH bounding-box positions.
+
+        Returns list of dicts:
+          {text, cx, cy} — cx/cy are the center of the text box,
+          relative to the image origin (top-left = 0,0).
+        """
+        self._ensure_engine()
+        result, _ = self._ocr(str(image_path))
+        return self._boxes_from_result(result)
+
+    def extract_text_with_boxes_from_image(self, image) -> list[dict]:
+        """Run OCR directly on a PIL Image (no file I/O)."""
+        import numpy as np
+        self._ensure_engine()
+        arr = np.array(image.convert("RGB"))
+        result, _ = self._ocr(arr)
+        return self._boxes_from_result(result)
+
+    @staticmethod
+    def _boxes_from_result(result) -> list[dict]:
+        if not result:
+            return []
+        items = []
+        for bbox, text, _confidence in result:
+            text = text.strip() if text else ""
+            if not text:
+                continue
+            xs = [p[0] for p in bbox]
+            ys = [p[1] for p in bbox]
+            items.append({
+                "text": text,
+                "cx": round(sum(xs) / len(xs)),
+                "cy": round(sum(ys) / len(ys)),
+                "top": min(ys),
+                "bottom": max(ys),
+                "left": min(xs),
+                "right": max(xs),
+            })
+        return items
 
     def extract_comments(self, image_path: str | Path) -> list[tuple[str, str]]:
         """Run OCR on a screenshot and parse into (nickname, text) pairs."""

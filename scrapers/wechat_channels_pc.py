@@ -29,7 +29,7 @@ class WechatChannelsPcScraper(WechatPcBaseScraper):
 
     platform_name = "wechat_channels"
 
-    def scrape(self, url: str) -> dict:
+    async def scrape(self, url: str) -> dict:
         """Scrape 视频号 comments."""
         # Delay between URLs
         if self._scrape_count > 0:
@@ -40,10 +40,13 @@ class WechatChannelsPcScraper(WechatPcBaseScraper):
         self._scrape_count += 1
 
         try:
-            # Step 1: Activate WeChat window
-            self.window_mgr.activate()
+            # Step 1: Activate WeChat window (must be foreground for paste/Enter)
+            if not self.window_mgr.activate():
+                raise RuntimeError(
+                    "无法将微信窗口切换到前台。请关闭其他可能拦截焦点的窗口后重试。"
+                )
             self.refresh_rect()
-            time.sleep(0.5)
+            time.sleep(0.8)  # let WeChat settle as foreground before clicking
 
             # Step 2: Open video
             self._open_video(url)
@@ -102,8 +105,9 @@ class WechatChannelsPcScraper(WechatPcBaseScraper):
 
     def _extract_comments(self, max_scrolls: int = 20) -> list[tuple[str, str]]:
         """OCR extract comments from the comment panel. Scrolls to load more."""
-        all_comments = []
-        seen = set()
+        from scrapers.wechat_ocr import merge_comment_fragments
+
+        raw: list[tuple[str, str]] = []
         prev_count = 0
         no_change_count = 0
 
@@ -112,30 +116,30 @@ class WechatChannelsPcScraper(WechatPcBaseScraper):
             batch = self.ocr_region(
                 "channels", "comment_panel_region", f"comments_{i:02d}"
             )
-            for nick, content in batch:
-                key = (nick, content[:30])
-                if key not in seen:
-                    seen.add(key)
-                    all_comments.append((nick, content))
+            raw.extend(batch)
 
             # Check if new comments appeared
-            if len(all_comments) == prev_count:
+            if len(batch) == 0:
                 no_change_count += 1
                 if no_change_count >= 3:
                     logger.debug("[wechat_channels] No new comments after 3 scrolls")
                     break
             else:
                 no_change_count = 0
-            prev_count = len(all_comments)
+            prev_count = len(raw)
 
-            # Scroll down in comment panel
-            self.scroll_at_key("channels", "scroll_anchor", clicks=-3)
+            # Scroll down in comment panel (wheel at region center)
+            region_left, region_top, region_w, region_h = \
+                self.resolve_region("channels", "comment_panel_region")
+            cx = region_left + region_w // 2
+            cy = region_top + region_h // 2
+            self._scroll_spaced(3, cx, cy)
             time.sleep(1.5)
 
             if i > 0 and i % 5 == 4:
                 logger.debug(
                     f"[wechat_channels] Scroll {i+1}/{max_scrolls}, "
-                    f"comments: {len(all_comments)}"
+                    f"raw pairs: {len(raw)}"
                 )
 
-        return all_comments
+        return merge_comment_fragments(raw)

@@ -1,5 +1,5 @@
 {
-  "active_profile": "wechat_pc_default_125",
+  "active_profile": "wechat_pc_calibrated",
   "profiles": {
     "wechat_pc_default_100": {
       "meta": {
@@ -9,25 +9,42 @@
         "window_min_height": 800
       },
       "wechat_main": {
-        "search_bar": { "x_ratio": 0.14, "y_ratio": 0.06 },
-        "result_open_entry": { "x_ratio": 0.21, "y_ratio": 0.22 }
+        "search_bar": {
+          "x_ratio": 0.14,
+          "y_ratio": 0.06
+        },
+        "result_open_entry": {
+          "x_ratio": 0.21,
+          "y_ratio": 0.22
+        }
       },
       "official": {
-        "article_scroll_start": { "x_ratio": 0.50, "y_ratio": 0.72 },
-        "article_scroll_end": { "x_ratio": 0.50, "y_ratio": 0.32 },
+        "comment_icon": {
+          "x_ratio": 0.5,
+          "y_ratio": 0.95
+        },
         "comment_region": {
-          "left_ratio": 0.48, "top_ratio": 0.20,
-          "width_ratio": 0.47, "height_ratio": 0.70
+          "left_ratio": 0.48,
+          "top_ratio": 0.2,
+          "width_ratio": 0.47,
+          "height_ratio": 0.7
         }
       },
       "channels": {
-        "pause_video": { "x_ratio": 0.43, "y_ratio": 0.42 },
-        "comment_button": { "x_ratio": 0.84, "y_ratio": 0.76 },
-        "comment_panel_region": {
-          "left_ratio": 0.50, "top_ratio": 0.00,
-          "width_ratio": 0.45, "height_ratio": 0.78
+        "pause_video": {
+          "x_ratio": 0.43,
+          "y_ratio": 0.42
         },
-        "scroll_anchor": { "x_ratio": 0.72, "y_ratio": 0.45 }
+        "comment_button": {
+          "x_ratio": 0.84,
+          "y_ratio": 0.76
+        },
+        "comment_panel_region": {
+          "left_ratio": 0.5,
+          "top_ratio": 0.0,
+          "width_ratio": 0.45,
+          "height_ratio": 0.78
+        }
       }
     },
     "wechat_pc_default_125": {
@@ -38,25 +55,42 @@
         "window_min_height": 800
       },
       "wechat_main": {
-        "search_bar": { "x_ratio": 0.14, "y_ratio": 0.06 },
-        "result_open_entry": { "x_ratio": 0.21, "y_ratio": 0.22 }
+        "search_bar": {
+          "x_ratio": 0.14,
+          "y_ratio": 0.06
+        },
+        "result_open_entry": {
+          "x_ratio": 0.21,
+          "y_ratio": 0.22
+        }
       },
       "official": {
-        "article_scroll_start": { "x_ratio": 0.50, "y_ratio": 0.72 },
-        "article_scroll_end": { "x_ratio": 0.50, "y_ratio": 0.32 },
+        "comment_icon": {
+          "x_ratio": 0.5,
+          "y_ratio": 0.95
+        },
         "comment_region": {
-          "left_ratio": 0.48, "top_ratio": 0.20,
-          "width_ratio": 0.47, "height_ratio": 0.70
+          "left_ratio": 0.48,
+          "top_ratio": 0.2,
+          "width_ratio": 0.47,
+          "height_ratio": 0.7
         }
       },
       "channels": {
-        "pause_video": { "x_ratio": 0.43, "y_ratio": 0.42 },
-        "comment_button": { "x_ratio": 0.84, "y_ratio": 0.76 },
-        "comment_panel_region": {
-          "left_ratio": 0.50, "top_ratio": 0.00,
-          "width_ratio": 0.45, "height_ratio": 0.78
+        "pause_video": {
+          "x_ratio": 0.43,
+          "y_ratio": 0.42
         },
-        "scroll_anchor": { "x_ratio": 0.72, "y_ratio": 0.45 }
+        "comment_button": {
+          "x_ratio": 0.84,
+          "y_ratio": 0.76
+        },
+        "comment_panel_region": {
+          "left_ratio": 0.5,
+          "top_ratio": 0.0,
+          "width_ratio": 0.45,
+          "height_ratio": 0.78
+        }
       }
     },
     "wechat_pc_default_150": {
@@ -67,26 +101,79 @@
         "window_min_height": 800
       },
       "wechat_main": {
-        "search_bar": { "x_ratio": 0.14, "y_ratio": 0.06 },
-        "result_open_entry": { "x_ratio": 0.21, "y_ratio": 0.22 }
+        "search_bar": {
+          "x_ratio": 0.14,
+          "y_ratio": 0.06
+        },
+        "result_open_entry": {
+          "x_ratio": 0.21,
+          "y_ratio": 0.22
+        }
       },
       "official": {
-        "article_scroll_start": { "x_ratio": 0.50, "y_ratio": 0.72 },
-        "article_scroll_end": { "x_ratio": 0.50, "y_ratio": 0.32 },
+        "comment_icon": {
+          "x_ratio": 0.5,
+          "y_ratio": 0.95
+        },
         "comment_region": {
-          "left_ratio": 0.48, "top_ratio": 0.20,
-          "width_ratio": 0.47, "height_ratio": 0.70
+          "left_ratio": 0.48,
+          "top_ratio": 0.2,
+          "width_ratio": 0.47,
+          "height_ratio": 0.7
         }
       },
       "channels": {
-        "pause_video": { "x_ratio": 0.43, "y_ratio": 0.42 },
-        "comment_button": { "x_ratio": 0.84, "y_ratio": 0.76 },
-        "comment_panel_region": {
-          "left_ratio": 0.50, "top_ratio": 0.00,
-          "width_ratio": 0.45, "height_ratio": 0.78
+        "pause_video": {
+          "x_ratio": 0.43,
+          "y_ratio": 0.42
         },
-        "scroll_anchor": { "x_ratio": 0.72, "y_ratio": 0.45 }
+        "comment_button": {
+          "x_ratio": 0.84,
+          "y_ratio": 0.76
+        },
+        "comment_panel_region": {
+          "left_ratio": 0.5,
+          "top_ratio": 0.0,
+          "width_ratio": 0.45,
+          "height_ratio": 0.78
+        }
       }
+    },
+    "wechat_pc_calibrated": {
+      "meta": {
+        "wechat_version": "calibrated",
+        "dpi_scale": 1.0,
+        "calibrated_at": "2026-07-07T10:32:03.635061+00:00",
+        "window_rect": {
+          "left": 50,
+          "top": 50,
+          "width": 1386,
+          "height": 969
+        }
+      },
+      "wechat_main": {
+        "search_bar": {
+          "x_ratio": 0.1773,
+          "y_ratio": 0.065
+        },
+        "result_open_entry": {
+          "x_ratio": 1.1815,
+          "y_ratio": 0.2673
+        }
+      },
+      "official": {
+        "comment_icon": {
+          "x_ratio": 0.9517,
+          "y_ratio": 0.9432
+        },
+        "comment_region": {
+          "left_ratio": 0.7114,
+          "top_ratio": 0.1176,
+          "width_ratio": 0.2734,
+          "height_ratio": 0.7781
+        }
+      },
+      "channels": {}
     }
   }
 }

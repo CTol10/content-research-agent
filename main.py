@@ -250,6 +250,63 @@ def read_input_excel(filepath) -> list[dict]:
     return rows
 
 
+def _ensure_wechat_config(requested_platforms: set):
+    """Auto-check WeChat PC calibration config. Prompt to calibrate if missing."""
+    wechat_keys = {"wechat", "wechat_channels"}
+    # Only check when wechat platforms are explicitly requested, or when
+    # running without platform filter (all platforms — check anyway)
+    if requested_platforms and not (requested_platforms & wechat_keys):
+        return
+
+    from pathlib import Path as _Path
+    config_path = _Path("config.wechat_pc.json")
+    if not config_path.exists():
+        print("\n" + "=" * 60)
+        print("  检测到需要微信公众号/视频号功能，但未找到坐标配置文件。")
+        print("  需要先校准微信窗口中的 UI 元素位置。")
+        print("=" * 60)
+        _offer_calibration()
+        return
+
+    try:
+        import json
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        profile_name = data.get("active_profile", "")
+        profile = data.get("profiles", {}).get(profile_name, {})
+        if not profile or "wechat_main" not in profile:
+            print("\n" + "=" * 60)
+            print("  微信坐标配置不完整，需要重新校准。")
+            print("=" * 60)
+            _offer_calibration()
+    except Exception:
+        print("\n" + "=" * 60)
+        print("  微信坐标配置文件损坏，需要重新校准。")
+        print("=" * 60)
+        _offer_calibration()
+
+
+def _offer_calibration():
+    """Offer to run WeChat calibration interactively."""
+    print("  请确保微信 PC 客户端已启动并登录。")
+    print()
+    try:
+        answer = input("  是否现在开始校准？[Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  已取消。请稍后手动运行: 评论抓取工具.exe --wechat-calibrate")
+        sys.exit(1)
+    if answer and answer not in ("y", "yes", ""):
+        print("  已跳过校准。请稍后手动运行: 评论抓取工具.exe --wechat-calibrate")
+        sys.exit(1)
+    print()
+    from scrapers.wechat_calibrator import WechatCalibrator
+    calibrator = WechatCalibrator()
+    ok = calibrator.calibrate_all()
+    if not ok:
+        print("\n  校准未完成，无法继续。")
+        sys.exit(1)
+    print("\n  校准完成，继续抓取流程...\n")
+
+
 _PLATFORM_DISPLAY = {
     "douyin": "抖音",
     "xiaohongshu": "小红书",
@@ -617,6 +674,9 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
 
     active_platforms = {r["platform_key"] for r in rows}
 
+    # Ensure WeChat calibration is ready if wechat platforms are active
+    _ensure_wechat_config(active_platforms)
+
     for platform_key, scraper_cls in scraper_classes.items():
         if platform_key not in active_platforms:
             continue
@@ -629,8 +689,13 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
         try:
             await scraper.start()
         except Exception as e:
-            print(f"[错误] 无法启动浏览器: {e}")
-            print("请确认已安装 Playwright Chromium: playwright install chromium")
+            is_wechat = platform_key in ("wechat", "wechat_channels")
+            if is_wechat:
+                print(f"[错误] 启动微信抓取失败: {e}")
+                print("请确保微信 PC 客户端已启动并登录，然后重试。")
+            else:
+                print(f"[错误] 无法启动浏览器: {e}")
+                print("请确认已安装 Playwright Chromium: playwright install chromium")
             fail_count += len(platform_rows)
             for row in platform_rows:
                 results.append({
@@ -639,7 +704,7 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
                     "url": row["url"],
                     "status": "失败",
                     "comment_count": 0,
-                    "error": f"浏览器启动失败: {e}",
+                    "error": f"微信启动失败: {e}" if is_wechat else f"浏览器启动失败: {e}",
                 })
             continue
 
@@ -891,6 +956,8 @@ def main():
     parser.add_argument("--no-video", action="store_true", help="跳过视频口播处理（不下载视频、不转录）")
     parser.add_argument("--wechat-mode", default="pc", choices=["pc", "browser", "auto"],
                         help="微信操作模式: pc(桌面相对坐标,默认) browser(浏览器) auto(自动选择)")
+    parser.add_argument("--wechat-calibrate", action="store_true",
+                        help="校准微信PC桌面坐标（交互式点击记录UI元素位置）")
     args = parser.parse_args()
 
     if not args.setup:
@@ -913,6 +980,22 @@ def main():
     import config
     config.COOKIE_DIR.mkdir(parents=True, exist_ok=True)
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Handle --wechat-calibrate (before any run/login flow)
+    if args.wechat_calibrate:
+        from scrapers.wechat_calibrator import WechatCalibrator
+        calibrator = WechatCalibrator()
+        ok = calibrator.calibrate_all()
+        sys.exit(0 if ok else 1)
+
+    # Pre-check: if WeChat platforms are requested, ensure calibration exists
+    if args.run or not args.login_open and not args.login_save and not args.login:
+        # Determine which platforms will be used
+        if args.platforms:
+            requested = set(p.strip() for p in args.platforms.split(",") if p.strip())
+        else:
+            requested = set()
+        _ensure_wechat_config(requested)
 
     if getattr(sys, 'frozen', False):
         print("=" * 60)
