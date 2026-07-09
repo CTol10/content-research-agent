@@ -1,8 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for 评论抓取工具."""
-
+import glob as _glob
 import os
 from pathlib import Path
+
+# ── Collect rapidocr_onnxruntime data files (.yaml and .onnx) ──
+# PyInstaller only auto-collects .py files; .yaml config and .onnx model
+# files must be added explicitly or rapidocr fails with "config.yaml does
+# not exist" at runtime.
+_RAPIDOCR_PKG = Path(os.environ.get(
+    "RAPIDOCR_PKG",
+    r"C:\Users\chenwentao\.workbuddy\binaries\python\versions\3.13.12\Lib\site-packages\rapidocr_onnxruntime"
+))
+_rapidocr_datas = []
+for _pattern in ["**/*.yaml", "**/*.onnx"]:
+    for _src in _glob.glob(str(_RAPIDOCR_PKG / _pattern), recursive=True):
+        _src_path = Path(_src)
+        _rel = _src_path.relative_to(_RAPIDOCR_PKG.parent)
+        _rapidocr_datas.append((str(_src_path), str(_rel.parent)))
 
 a = Analysis(
     ['main.py'],
@@ -10,8 +25,9 @@ a = Analysis(
     binaries=[],
     datas=[
         ('config.ini.example', '.'),
+        ('config.wechat_pc.json', '.'),
         ('input', 'input'),
-    ],
+    ] + _rapidocr_datas,
     hiddenimports=[
         'classifier',
         'config',
@@ -21,11 +37,12 @@ a = Analysis(
         'scrapers.douyin',
         'scrapers.xiaohongshu',
         'scrapers.weibo',
-        'scrapers.wechat',
-        'scrapers.wechat_official',
-        'scrapers.wechat_channels',
-        'scrapers.wechat_channels_emulator',
-        'scrapers.appium_base',
+        'scrapers.wechat_pc_base',
+        'scrapers.wechat_official_pc',
+        'scrapers.wechat_channels_pc',
+        'scrapers.wechat_window_manager',
+        'scrapers.wechat_ocr',
+        'scrapers.wechat_calibrator',
         'scrapers.toutiao',
         'scrapers.comment_cleaner',
         'playwright',
@@ -39,6 +56,12 @@ a = Analysis(
         'requests',
         'pyautogui',
         'rapidocr_onnxruntime',
+        'rapidocr_onnxruntime.ch_ppocr_v3_det',
+        'rapidocr_onnxruntime.ch_ppocr_v3_det.text_detect',
+        'rapidocr_onnxruntime.ch_ppocr_v3_rec',
+        'rapidocr_onnxruntime.ch_ppocr_v3_rec.text_recognize',
+        'rapidocr_onnxruntime.ch_ppocr_v2_cls',
+        'rapidocr_onnxruntime.ch_ppocr_v2_cls.text_cls',
         'onnxruntime',
         'numpy',
         'asyncio',

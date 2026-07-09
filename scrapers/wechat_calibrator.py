@@ -81,16 +81,6 @@ CALIBRATION_STEPS = [
     },
     {
         "section": "official",
-        "key": "article_scroll_start",
-        "type": "point",
-        "title": "公众号 - 文章滚动点",
-        "instructions": (
-            "请先在微信中打开一篇 公众号文章（搜索链接后点击访问网页），\n"
-            "然后将鼠标移动到 文章评论区上方（用于滚动的锚点位置）"
-        ),
-    },
-    {
-        "section": "official",
         "key": "comment_icon",
         "type": "point",
         "title": "公众号 - 评论区图标",
@@ -139,16 +129,6 @@ CALIBRATION_STEPS = [
             "在视频号页面打开评论面板（点击评论按钮），\n"
             "第一次按 F8: 记录评论面板【左上角】\n"
             "第二次按 F8: 记录评论面板【右下角】"
-        ),
-    },
-    {
-        "section": "channels",
-        "key": "scroll_anchor",
-        "type": "point",
-        "title": "视频号 - 评论面板滚动点",
-        "instructions": (
-            "在评论面板打开的状态下，\n"
-            "将鼠标移动到 评论面板中间区域（用于滚动的锚点）"
         ),
     },
 ]
@@ -204,6 +184,15 @@ class WechatCalibrator:
             section = step["section"]
             key = step["key"]
             step_type = step["type"]
+
+            # Refresh window rect BEFORE each step — the window may have
+            # resized (e.g. article view widens from 942→1386 px)
+            if self._window_mgr.is_found:
+                self._rect = self._window_mgr.get_rect()
+                print(
+                    f"\n[窗口] ({self._rect.left}, {self._rect.top}) "
+                    f"{self._rect.width}x{self._rect.height}"
+                )
 
             # Print step header
             print()
@@ -330,7 +319,12 @@ class WechatCalibrator:
         return True
 
     def _save(self) -> None:
-        """Write calibrated profile to config.wechat_pc.json."""
+        """Write calibrated profile to config.wechat_pc.json.
+
+        Merges with any existing calibrated profile so that running
+        calibration for a single new step does not wipe out previously
+        recorded coordinates.
+        """
         # Load existing config or create new
         existing = {}
         if _CALIBRATION_CONFIG.exists():
@@ -343,7 +337,23 @@ class WechatCalibrator:
 
         profiles = existing.get("profiles", {})
 
-        # Add/update calibrated profile
+        # Merge with existing calibrated profile — keep old keys
+        prev = profiles.get(_CALIBRATED_PROFILE, {})
+        merged = {
+            "wechat_main": {
+                **prev.get("wechat_main", {}),
+                **self._data.get("wechat_main", {}),
+            },
+            "official": {
+                **prev.get("official", {}),
+                **self._data.get("official", {}),
+            },
+            "channels": {
+                **prev.get("channels", {}),
+                **self._data.get("channels", {}),
+            },
+        }
+
         profiles[_CALIBRATED_PROFILE] = {
             "meta": {
                 "wechat_version": "calibrated",
@@ -356,7 +366,7 @@ class WechatCalibrator:
                     "height": self._rect.height,
                 },
             },
-            **self._data,
+            **merged,
         }
 
         output = {

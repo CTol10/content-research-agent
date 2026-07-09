@@ -29,7 +29,7 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
 
     platform_name = "wechat"
 
-    def scrape(self, url: str) -> dict:
+    async def scrape(self, url: str) -> dict:
         """Scrape article content and comments."""
         # Delay between URLs
         if self._scrape_count > 0:
@@ -40,10 +40,13 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
         self._scrape_count += 1
 
         try:
-            # Step 1: Activate WeChat window
-            self.window_mgr.activate()
+            # Step 1: Activate WeChat window (must be foreground for paste/Enter)
+            if not self.window_mgr.activate():
+                raise RuntimeError(
+                    "无法将微信窗口切换到前台。请关闭其他可能拦截焦点的窗口后重试。"
+                )
             self.refresh_rect()
-            time.sleep(0.5)
+            time.sleep(0.8)  # let WeChat settle as foreground before clicking
 
             # Step 2: Search and open article
             self._open_article(url)
@@ -86,32 +89,35 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
     # ── Navigation ───────────────────────────────────────────────
 
     def _open_article(self, url: str) -> None:
-        """Open article URL via WeChat search bar."""
-        # Click search bar
+        """Open article URL via WeChat search bar.
+
+        WeChat 4.x requires TWO clicks on the search bar to open the
+        search interface.
+        """
+        # Two clicks needed — first click opens the search sub-page,
+        # second click focuses the input field
         self.click_key("wechat_main", "search_bar", "搜索栏")
+        time.sleep(0.4)
+        self.click_key("wechat_main", "search_bar", "搜索栏")
+        time.sleep(0.4)
         self.clear_input()
 
-        # Paste URL and search
+        # Paste URL and press Enter (uses keybd_event)
         self.paste_and_enter(url)
-        time.sleep(3)
+        time.sleep(2)
 
-        # Click search result entry (访问网页 or similar)
-        self.click_key("wechat_main", "result_open_entry", "搜索结果")
+        # Click the "访问网页" button using calibrated coordinates
+        self.click_key("wechat_main", "result_open_entry", "访问网页")
         time.sleep(5)
 
     # ── Scrolling + Expand ─────────────────────────────────────
 
     def _scroll_and_expand_comments(self, max_scrolls: int = 40) -> None:
-        """Scroll through comments and click '展开/x条回复' buttons as we go.
+        """Scroll through comments and click '展开/x条回复' buttons.
 
-        Clicks inside the comment panel once to grab focus, then scrolls
-        one screen-height per iteration. OCR scans for expand buttons
-        after each scroll and clicks them from bottom to top.
+        Uses the scrollbar (page-down clicks on the track) to scroll one
+        screen per iteration, and screenshot pixel-diff to detect bottom.
         """
-        prev_line_count = 0
-        no_change_count = 0
-        total_expanded = 0
-
         region_left, region_top, region_w, region_h = \
             self.resolve_region("official", "comment_region")
         focus_x = region_left + region_w // 2
@@ -121,27 +127,50 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
         pyautogui.click(focus_x, focus_y)
         time.sleep(0.5)
 
-        for i in range(max_scrolls):
-            # Scroll one full screen (PageDown key)
-            pyautogui.press("pagedown")
-            time.sleep(1.0)
+        total_expanded = 0
+        prev_img = self.screenshot_region_as_image(
+            "official", "comment_region", "expand_00_before"
+        )
 
-            # Check OCR line count for scroll-stop heuristic
-            try:
-                lines = self.ocr_region_lines(
-                    "official", "comment_region", f"scroll_{i:02d}"
+        # Check the FIRST screen for expand buttons BEFORE any scroll
+        buttons = self.find_expand_buttons(
+            "official", "comment_region", "expand_first_screen"
+        )
+        if buttons:
+            logger.info(f"[wechat] First screen: {len(buttons)} expand buttons")
+            for btn in buttons:
+                self.click_point(
+                    btn["screen_x"], btn["screen_y"],
+                    f"展开:{btn['text']}",
                 )
-                current_count = len(lines)
-            except Exception:
-                current_count = 0
+                time.sleep(0.3)
+            total_expanded += len(buttons)
+            time.sleep(0.8)
 
-            # Check for expand buttons in current viewport
+        for i in range(max_scrolls):
+            # Scroll ~2/3 screen via thumb drag (more overlap = less missed)
+            self.scrollbar_scroll_fraction("official", "comment_region", 2/3)
+            time.sleep(0.8)
+
+            curr_img = self.screenshot_region_as_image(
+                "official", "comment_region", f"expand_{i:02d}"
+            )
+
+            # Pixel-diff: has the view actually changed?
+            if self.images_similar(prev_img, curr_img):
+                logger.info(
+                    f"[wechat] Scroll {i+1}: no visual change — "
+                    f"reached bottom ({total_expanded} expanded)"
+                )
+                break
+
+            # Find and click expand buttons in current viewport
             buttons = self.find_expand_buttons(
                 "official", "comment_region", f"expand_{i:02d}"
             )
             if buttons:
                 logger.info(
-                    f"[wechat] Scroll {i+1}: found {len(buttons)} expand buttons"
+                    f"[wechat] Scroll {i+1}: {len(buttons)} expand buttons"
                 )
                 for btn in buttons:  # bottom-to-top (already sorted)
                     self.click_point(
@@ -152,64 +181,123 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
                 total_expanded += len(buttons)
                 time.sleep(0.8)
 
-            if current_count == prev_line_count:
-                no_change_count += 1
-                if no_change_count >= 5 and not buttons and i >= 10:
-                    logger.debug(
-                        f"[wechat] Stable at {current_count} lines, "
-                        f"no expand buttons — done"
-                    )
-                    break
-            else:
-                no_change_count = 0
-            prev_line_count = current_count
-
             logger.debug(
                 f"[wechat] Scroll {i+1}/{max_scrolls}: "
-                f"OCR={current_count} lines, expanded={total_expanded}"
+                f"expanded={total_expanded}"
             )
+            prev_img = curr_img
+
+        # After reaching bottom, wheel-scroll to trigger any
+        # final lazy-loaded content
+        logger.info("[wechat] Scrollbar reached bottom, wheel-scrolling 1000")
+        pyautogui.moveTo(focus_x, focus_y)
+        pyautogui.scroll(-1000)
+        time.sleep(1.5)
+
+        # Screenshot and check for expand buttons after wheel scroll
+        buttons = self.find_expand_buttons(
+            "official", "comment_region", "expand_wheel"
+        )
+        if buttons:
+            logger.info(f"[wechat] Wheel expand: {len(buttons)} buttons")
+            for btn in buttons:
+                self.click_point(
+                    btn["screen_x"], btn["screen_y"],
+                    f"展开:{btn['text']}",
+                )
+                time.sleep(0.3)
+            total_expanded += len(buttons)
+
+        logger.info(
+            f"[wechat] Expand pass done: {total_expanded} total expanded"
+        )
 
     # ── Comment extraction ───────────────────────────────────────
 
+    def _scroll_to_top(self) -> None:
+        """Scroll the comment panel back to the top.
+
+        Drags the scrollbar thumb to the very top — one action, instant.
+        Falls back to nothing if the scrollbar can't be found (the
+        caller's image-diff will still work).
+        """
+        self.scrollbar_drag_to_top("official", "comment_region")
+
     def _extract_comments(self) -> list[tuple[str, str]]:
-        """OCR extract comments from the comment region."""
-        comments = []
-        seen = set()
+        """OCR extract comments from the comment region.
+
+        Scrolls back to the top first, then walks down screen-by-screen,
+        using screenshot pixel-diff to detect when we've reached the
+        bottom (no new visual content after scrolling).
+
+        Cross-screen comment fragments (from long comments that span a
+        viewport boundary) are spliced together by
+        :func:`~scrapers.wechat_ocr.merge_comment_fragments` as a
+        post-processing pass.
+        """
+        from scrapers.wechat_ocr import merge_comment_fragments
 
         region_left, region_top, region_w, region_h = \
             self.resolve_region("official", "comment_region")
         focus_x = region_left + region_w // 2
         focus_y = region_top + region_h // 2
 
-        # One click to focus, then scroll through
-        pyautogui.click(focus_x, focus_y)
+        # ── Scroll back to top ──
+        logger.debug("[wechat] Scrolling back to top for extraction pass")
+        self._scroll_to_top()
         time.sleep(0.5)
 
-        prev_count = 0
-        no_change_count = 0
+        # ── Walk down, OCR each screen ──
+        raw: list[tuple[str, str]] = []  # collect all, merge later
 
-        for i in range(15):
+        prev_img = self.screenshot_region_as_image(
+            "official", "comment_region", "extract_00"
+        )
+
+        for i in range(40):
+            # OCR the current viewport
             batch = self.ocr_region(
-                "official", "comment_region", f"comments_{i:02d}"
+                "official", "comment_region", f"extract_{i:02d}"
             )
-            for nick, content in batch:
-                key = (nick, content[:30])
-                if key not in seen:
-                    seen.add(key)
-                    comments.append((nick, content))
+            raw.extend(batch)
 
-            if len(comments) == prev_count:
-                no_change_count += 1
-                if no_change_count >= 3:
-                    break
-            else:
-                no_change_count = 0
-            prev_count = len(comments)
+            logger.debug(
+                f"[wechat] Screen {i+1}: {len(batch)} OCR pairs, "
+                f"{len(raw)} total raw"
+            )
 
-            # Scroll one full screen
-            pyautogui.press("pagedown")
-            time.sleep(1.0)
+            # Scroll ~2/3 screen via thumb drag (more overlap = less missed)
+            self.scrollbar_scroll_fraction("official", "comment_region", 2/3)
+            time.sleep(0.8)
 
+            curr_img = self.screenshot_region_as_image(
+                "official", "comment_region", f"extract_{i+1:02d}"
+            )
+
+            # Pixel-diff: has the view changed?
+            if self.images_similar(prev_img, curr_img):
+                # At scrollbar bottom — wheel-scroll to reveal any
+                # remaining lazy-loaded content
+                logger.info("[wechat] OCR bottom, wheel-scrolling 1000")
+                pyautogui.moveTo(focus_x, focus_y)
+                pyautogui.scroll(-1000)
+                time.sleep(1.5)
+
+                # Final OCR pass
+                batch = self.ocr_region(
+                    "official", "comment_region", f"extract_{i+2:02d}_final"
+                )
+                raw.extend(batch)
+                logger.info(
+                    f"[wechat] Final OCR: {len(batch)} pairs, "
+                    f"{len(raw)} total raw"
+                )
+                break
+
+            prev_img = curr_img
+
+        # Post-process: splice cross-screen fragments, dedup
+        comments = merge_comment_fragments(raw)
         return comments
 
     # ── Content extraction ───────────────────────────────────────

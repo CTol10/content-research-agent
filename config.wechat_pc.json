@@ -19,14 +19,6 @@
         }
       },
       "official": {
-        "article_scroll_start": {
-          "x_ratio": 0.5,
-          "y_ratio": 0.72
-        },
-        "article_scroll_end": {
-          "x_ratio": 0.5,
-          "y_ratio": 0.32
-        },
         "comment_icon": {
           "x_ratio": 0.5,
           "y_ratio": 0.95
@@ -52,10 +44,6 @@
           "top_ratio": 0.0,
           "width_ratio": 0.45,
           "height_ratio": 0.78
-        },
-        "scroll_anchor": {
-          "x_ratio": 0.72,
-          "y_ratio": 0.45
         }
       }
     },
@@ -77,14 +65,6 @@
         }
       },
       "official": {
-        "article_scroll_start": {
-          "x_ratio": 0.5,
-          "y_ratio": 0.72
-        },
-        "article_scroll_end": {
-          "x_ratio": 0.5,
-          "y_ratio": 0.32
-        },
         "comment_icon": {
           "x_ratio": 0.5,
           "y_ratio": 0.95
@@ -110,10 +90,6 @@
           "top_ratio": 0.0,
           "width_ratio": 0.45,
           "height_ratio": 0.78
-        },
-        "scroll_anchor": {
-          "x_ratio": 0.72,
-          "y_ratio": 0.45
         }
       }
     },
@@ -135,14 +111,6 @@
         }
       },
       "official": {
-        "article_scroll_start": {
-          "x_ratio": 0.5,
-          "y_ratio": 0.72
-        },
-        "article_scroll_end": {
-          "x_ratio": 0.5,
-          "y_ratio": 0.32
-        },
         "comment_icon": {
           "x_ratio": 0.5,
           "y_ratio": 0.95
@@ -168,10 +136,6 @@
           "top_ratio": 0.0,
           "width_ratio": 0.45,
           "height_ratio": 0.78
-        },
-        "scroll_anchor": {
-          "x_ratio": 0.72,
-          "y_ratio": 0.45
         }
       }
     },
@@ -179,7 +143,7 @@
       "meta": {
         "wechat_version": "calibrated",
         "dpi_scale": 1.0,
-        "calibrated_at": "2026-07-06T07:03:37.399396+00:00",
+        "calibrated_at": "2026-07-07T10:32:03.635061+00:00",
         "window_rect": {
           "left": 50,
           "top": 50,
@@ -189,28 +153,24 @@
       },
       "wechat_main": {
         "search_bar": {
-          "x_ratio": 0.1921,
-          "y_ratio": 0.0537
+          "x_ratio": 0.1773,
+          "y_ratio": 0.065
         },
         "result_open_entry": {
-          "x_ratio": 1.1369,
-          "y_ratio": 0.2477
+          "x_ratio": 1.1815,
+          "y_ratio": 0.2673
         }
       },
       "official": {
-        "article_scroll_start": {
-          "x_ratio": 0.8218,
-          "y_ratio": 0.6646
-        },
         "comment_icon": {
-          "x_ratio": 0.9545,
-          "y_ratio": 0.9463
+          "x_ratio": 0.9517,
+          "y_ratio": 0.9432
         },
         "comment_region": {
-          "left_ratio": 0.7136,
-          "top_ratio": 0.1476,
-          "width_ratio": 0.2576,
-          "height_ratio": 0.7585
+          "left_ratio": 0.7114,
+          "top_ratio": 0.1176,
+          "width_ratio": 0.2734,
+          "height_ratio": 0.7781
         }
       },
       "channels": {}

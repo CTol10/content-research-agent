@@ -71,13 +71,6 @@ STEPS = [
     },
     {
         "section": "official",
-        "key": "article_scroll_start",
-        "type": "point",
-        "title": "公众号 - 文章滚动点",
-        "desc": "打开一篇公众号文章，评论区上方用于滚动的锚点",
-    },
-    {
-        "section": "official",
         "key": "comment_icon",
         "type": "point",
         "title": "公众号 - 评论区图标",
@@ -110,13 +103,6 @@ STEPS = [
         "type": "region",
         "title": "视频号 - 评论面板",
         "desc": "视频号评论面板区域\n  第1次 F8: 左上角 | 第2次 F8: 右下角",
-    },
-    {
-        "section": "channels",
-        "key": "scroll_anchor",
-        "type": "point",
-        "title": "视频号 - 滚动锚点",
-        "desc": "评论面板中间区域（用于滚动）",
     },
 ]
 
@@ -151,6 +137,12 @@ def main():
     for i, step in enumerate(STEPS, 1):
         section = step["section"]
         key = step["key"]
+
+        # Refresh window rect BEFORE each step — the window may have
+        # resized (e.g. article view widens from 942→1386 px)
+        if mgr.is_found:
+            rect = mgr.get_rect()
+            print(f"[窗口] ({rect.left}, {rect.top}) {rect.width}x{rect.height}")
 
         print("=" * 60)
         print(f"  [{i}/{len(STEPS)}] {step['title']}")
@@ -231,6 +223,12 @@ def main():
             pass
 
     profiles = existing.get("profiles", {})
+    prev = profiles.get(CALIBRATED_PROFILE, {})
+    merged = {
+        "wechat_main": {**prev.get("wechat_main", {}), **data.get("wechat_main", {})},
+        "official": {**prev.get("official", {}), **data.get("official", {})},
+        "channels": {**prev.get("channels", {}), **data.get("channels", {})},
+    }
     profiles[CALIBRATED_PROFILE] = {
         "meta": {
             "wechat_version": "calibrated",
@@ -241,7 +239,7 @@ def main():
                 "width": rect.width, "height": rect.height,
             },
         },
-        **data,
+        **merged,
     }
 
     output = {"active_profile": CALIBRATED_PROFILE, "profiles": profiles}

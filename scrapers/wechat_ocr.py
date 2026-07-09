@@ -161,6 +161,86 @@ def parse_ocr_comments(lines: list[str]) -> list[tuple[str, str]]:
     return comments
 
 
+# ── Cross-screen fragment splicing ────────────────────────────────
+
+_MIN_OVERLAP = 8  # minimum chars for tail↔head overlap to be spliced
+
+
+def _try_splice(a: str, b: str) -> str | None:
+    """Try to splice two same-nickname comment fragments into one.
+
+    ``a`` is a fragment from an earlier screen (seen first), ``b`` is
+    from a later screen.  Returns the spliced result or None when the
+    two fragments appear to be *different* comments by the same person
+    (no meaningful overlap).
+
+    Merging rules (in order):
+      1. a == b          → pure dedup
+      2. b starts with a → b is a superset (comment short enough to fit
+           both screens fully, later OCR is better)
+      3. a ends with b   → a already contains b
+      4. a's tail overlaps b's head (>={_MIN_OVERLAP} chars) → splice
+    """
+    a, b = a.strip(), b.strip()
+    if not a or not b:
+        return None
+    if a == b:
+        return a
+    if b.startswith(a):
+        return b
+    if a.endswith(b):
+        return a
+
+    # Find the longest overlap: a's suffix == b's prefix
+    max_check = min(len(a), len(b)) - 1
+    for k in range(max_check, _MIN_OVERLAP - 1, -1):
+        if a[-k:] == b[:k]:
+            return a + b[k:]
+
+    return None
+
+
+def merge_comment_fragments(
+    pairs: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Merge cross-screen fragments of the same comment.
+
+    Walks ``pairs`` in screen order.  For each (nickname, content),
+    looks back at the most-recently-appended entry with the same
+    nickname and tries to splice the new fragment into it via
+    :func:`_try_splice`.  Spliced entries replace the old one when the
+    result is longer; otherwise the fragment is appended as a genuinely
+    new comment.
+    """
+    result: list[tuple[str, str]] = []
+
+    for nick, content in pairs:
+        merged = False
+        # Scan result backwards — the most recent same-nickname entry
+        # is the one that may be a split fragment of the same comment
+        # (N's clipped tail is immediately before N+1's head in
+        # screen-order pairs).
+        for j in range(len(result) - 1, -1, -1):
+            rnick, rcontent = result[j]
+            if rnick != nick:
+                continue
+            spliced = _try_splice(rcontent, content)
+            if spliced is not None:
+                # Replace with spliced version only when it's longer;
+                # always mark as merged (skip append) when spliceable.
+                if len(spliced) > len(rcontent):
+                    result[j] = (rnick, spliced)
+                merged = True
+                break
+            # Stop scanning once we find same-nickname — no need to
+            # look further back (that's an earlier distinct comment).
+            break
+        if not merged:
+            result.append((nick, content))
+
+    return result
+
+
 class WechatOcr:
     """OCR extraction for WeChat comment screenshots."""
 
@@ -188,6 +268,18 @@ class WechatOcr:
         """
         self._ensure_engine()
         result, _ = self._ocr(str(image_path))
+        return self._boxes_from_result(result)
+
+    def extract_text_with_boxes_from_image(self, image) -> list[dict]:
+        """Run OCR directly on a PIL Image (no file I/O)."""
+        import numpy as np
+        self._ensure_engine()
+        arr = np.array(image.convert("RGB"))
+        result, _ = self._ocr(arr)
+        return self._boxes_from_result(result)
+
+    @staticmethod
+    def _boxes_from_result(result) -> list[dict]:
         if not result:
             return []
         items = []
@@ -195,7 +287,6 @@ class WechatOcr:
             text = text.strip() if text else ""
             if not text:
                 continue
-            # bbox: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] (4 corners)
             xs = [p[0] for p in bbox]
             ys = [p[1] for p in bbox]
             items.append({
