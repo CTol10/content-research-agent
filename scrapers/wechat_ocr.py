@@ -39,8 +39,9 @@ def clean_nickname(line: str) -> str:
 
     Strips: time suffixes, province names, "作者"/"V" markers.
     """
-    # Remove time suffixes
+    # Remove time suffixes (both relative and absolute)
     line = re.sub(r'\d+天前|\d+小时前|\d+分钟前|刚刚|昨天|前天', '', line)
+    line = re.sub(r'\d+月\d+日|\d+年\d+月\d+日', '', line)
     # Remove Chinese province/region names
     line = re.sub(
         r'浙江|广东|北京|上海|江苏|山东|四川|河南|湖北|湖南|福建|安徽|'
@@ -60,6 +61,9 @@ def clean_comment_content(text: str) -> str:
     """
     # Remove "作者赞过"
     text = text.replace('作者赞过', '')
+    # Remove reply prefix: "回复XXX：" or "回复XXX:" at the start
+    # (OCR may merge the reply marker into comment content)
+    text = re.sub(r'^回复\s*\S+?\s*[：:]\s*', '', text)
     # Remove ad markers
     text = re.sub(r'\b广告\s*v?\b', '', text)
     # Remove time markers within content
@@ -100,8 +104,30 @@ def parse_ocr_comments(lines: list[str]) -> list[tuple[str, str]]:
     _SKIP_CONTENT = frozenset({
         "回复", "评论", "写留言", "作者赞过",
         "视频号", "搜索", "添加评论", "暂无评论",
-        "广告", "进入小程序",
+        "广告", "进入小程序", "首评",
     })
+
+    # Time markers for commenter info lines: relative time + absolute dates
+    _TIME_RE = re.compile(
+        r'\d+天前|\d+小时前|\d+分钟前|刚刚|昨天|前天'
+        r'|\d+月\d+日'
+        r'|\d+年\d+月\d+日'
+    )
+    # Province names — WeChat commenter info lines often show "昵称 省份"
+    _PROVINCE_RE = re.compile(
+        r'浙江|广东|北京|上海|江苏|山东|四川|河南|湖北|湖南|福建|安徽|'
+        r'辽宁|重庆|天津|河北|山西|吉林|黑龙江|江西|广西|海南|贵州|云南|'
+        r'西藏|陕西|甘肃|青海|宁夏|新疆|内蒙古'
+    )
+
+    def _is_commenter_line(line: str) -> bool:
+        """Check if a line looks like a commenter info line (nickname + meta)."""
+        return (
+            "作者" in line
+            or "V" in line
+            or bool(_TIME_RE.search(line))
+            or bool(_PROVINCE_RE.search(line))
+        )
 
     comments = []
     skip_author_caption = True
@@ -111,25 +137,21 @@ def parse_ocr_comments(lines: list[str]) -> list[tuple[str, str]]:
         line = lines[i]
 
         # Skip header / navigation / UI text
-        if re.match(r'^评论\s*\d', line) or line in _SKIP_CONTENT:
+        if (re.match(r'^(评论|留言)\s*\d', line) or line in _SKIP_CONTENT):
             i += 1
             continue
 
-        # Detect commenter info line: has time marker or author/V markers
-        has_time = bool(re.search(r'\d+天前|\d+小时前|\d+分钟前|刚刚|昨天|前天', line))
-        is_author = "作者" in line
-        is_commenter = is_author or "V" in line or has_time
+        # Detect commenter info line
+        is_commenter = _is_commenter_line(line)
 
         if is_commenter:
             # First author line is the video/post caption — skip it
-            if is_author and skip_author_caption:
+            if "作者" in line and skip_author_caption:
                 skip_author_caption = False
                 i += 1
                 while i < len(lines):
                     next_line = lines[i]
-                    if re.search(
-                        r'\d+天前|\d+小时前|\d+分钟前|刚刚|昨天|前天', next_line
-                    ) and "作者" not in next_line:
+                    if _is_commenter_line(next_line) and "作者" not in next_line:
                         break
                     i += 1
                 continue
@@ -143,10 +165,10 @@ def parse_ocr_comments(lines: list[str]) -> list[tuple[str, str]]:
             while i < len(lines):
                 next_line = lines[i]
                 # Stop at next commenter
-                if re.search(r'\d+天前|\d+小时前|\d+分钟前|刚刚|昨天|前天', next_line):
+                if _is_commenter_line(next_line):
                     break
                 # Stop at UI markers
-                if next_line in _SKIP_CONTENT or re.match(r'^评论\s*\d', next_line):
+                if next_line in _SKIP_CONTENT or re.match(r'^(评论|留言)\s*\d', next_line):
                     i += 1
                     continue
                 content_lines.append(next_line)

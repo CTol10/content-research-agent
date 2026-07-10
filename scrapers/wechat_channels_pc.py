@@ -45,7 +45,8 @@ class WechatChannelsPcScraper(WechatPcBaseScraper):
                 raise RuntimeError(
                     "无法将微信窗口切换到前台。请关闭其他可能拦截焦点的窗口后重试。"
                 )
-            self.refresh_rect()
+            if self._scrape_count == 1:
+                self.reacquire_window()
             time.sleep(0.8)  # let WeChat settle as foreground before clicking
 
             # Step 2: Open video

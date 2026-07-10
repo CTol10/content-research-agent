@@ -363,8 +363,13 @@ CDP_PLATFORMS = set()
 
 def check_cookies(platform_keys: list[str]) -> list[str]:
     import config
+    # WeChat platforms use desktop automation, not browser cookies.
+    # A separate WeChat window check runs before scraping.
+    _WECHAT_PLATFORMS = {"wechat", "wechat_channels"}
     missing = []
     for key in platform_keys:
+        if key in _WECHAT_PLATFORMS:
+            continue
         # Check if cookie file exists OR persistent browser profile exists
         cookie_path = config.COOKIE_DIR / f"{key}.json"
         browser_profile = config.COOKIE_DIR / "_browser_profile"
@@ -646,6 +651,24 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
         if still_missing:
             print(f"\n[警告] 以下平台仍未登录: {', '.join(still_missing)}")
             print("这些平台的链接将被跳过。")
+
+    # ── WeChat window check ──────────────────────────────────────
+    wechat_needed = [p for p in needed_platforms if p in ("wechat", "wechat_channels")]
+    if wechat_needed:
+        from scrapers.wechat_window_manager import WechatWindowManager
+        wm = WechatWindowManager()
+        if not wm.find_window():
+            print("\n" + "=" * 60)
+            print("  [提示] 检测到需要抓取微信平台，但微信窗口未打开。")
+            print("  请打开微信 PC 客户端并登录，然后按 Enter 继续...")
+            print("  （如果不需要抓取微信，可以按 Ctrl+C 退出，")
+            print("   下次运行时使用 --platforms 参数排除微信平台）")
+            print("=" * 60)
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                print("\n用户取消。")
+                return
 
     results = []
     success_count = 0

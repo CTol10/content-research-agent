@@ -45,7 +45,10 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
                 raise RuntimeError(
                     "无法将微信窗口切换到前台。请关闭其他可能拦截焦点的窗口后重试。"
                 )
-            self.refresh_rect()
+            # Only re-identify window on first URL (after increment, count==1).
+            # Subsequent URLs reuse the first rect to avoid drift.
+            if self._scrape_count == 1:
+                self.reacquire_window()
             time.sleep(0.8)  # let WeChat settle as foreground before clicking
 
             # Step 2: Search and open article
@@ -106,8 +109,19 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
         self.paste_and_enter(url)
         time.sleep(2)
 
-        # Click the "访问网页" button using calibrated coordinates
-        self.click_key("wechat_main", "result_open_entry", "访问网页")
+        # Click the "访问网页" button — use OCR to locate it because the
+        # search drop-down position varies with window size/layout.
+        # Search region: top-left quadrant of the window (roughly top half)
+        region_left = self._rect.left
+        region_top = self._rect.top
+        region_w = self._rect.width
+        region_h = self._rect.height // 2
+        if not self.click_text_via_ocr(
+            "访问网页", (region_left, region_top, region_w, region_h)
+        ):
+            # Fallback: try the calibrated coordinate
+            logger.warning("[wechat] OCR failed to find '访问网页', using calibrated coord")
+            self.click_key("wechat_main", "result_open_entry", "访问网页")
         time.sleep(5)
 
     # ── Scrolling + Expand ─────────────────────────────────────
@@ -117,6 +131,8 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
 
         Uses the scrollbar (page-down clicks on the track) to scroll one
         screen per iteration, and screenshot pixel-diff to detect bottom.
+        If no scrollbar is found, just handles expand buttons on the
+        first screen and returns (no scrolling needed for short pages).
         """
         region_left, region_top, region_w, region_h = \
             self.resolve_region("official", "comment_region")
@@ -126,6 +142,11 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
         # One click to focus the comment panel
         pyautogui.click(focus_x, focus_y)
         time.sleep(0.5)
+
+        # Check whether a scrollbar exists at all
+        has_scrollbar = self._find_scrollbar_thumb("official", "comment_region") is not None
+        if not has_scrollbar:
+            logger.info("[wechat] No scrollbar detected — single-screen page")
 
         total_expanded = 0
         prev_img = self.screenshot_region_as_image(
@@ -146,6 +167,12 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
                 time.sleep(0.3)
             total_expanded += len(buttons)
             time.sleep(0.8)
+
+        if not has_scrollbar:
+            logger.info(
+                f"[wechat] Single-screen page, {total_expanded} expanded"
+            )
+            return
 
         for i in range(max_scrolls):
             # Scroll ~2/3 screen via thumb drag (more overlap = less missed)
@@ -249,6 +276,18 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
 
         # ── Walk down, OCR each screen ──
         raw: list[tuple[str, str]] = []  # collect all, merge later
+
+        # Check whether a scrollbar exists
+        has_scrollbar = self._find_scrollbar_thumb("official", "comment_region") is not None
+
+        if not has_scrollbar:
+            logger.info("[wechat] No scrollbar — OCR first screen only")
+            batch = self.ocr_region(
+                "official", "comment_region", "extract_single"
+            )
+            raw.extend(batch)
+            logger.info(f"[wechat] Single-screen OCR: {len(batch)} pairs")
+            return merge_comment_fragments(raw)
 
         prev_img = self.screenshot_region_as_image(
             "official", "comment_region", "extract_00"

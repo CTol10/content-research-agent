@@ -102,6 +102,50 @@ class WechatPcBaseScraper:
         """No cleanup needed for PC approach."""
         pass
 
+    async def wait_for_login(self, timeout: int = 300) -> bool:
+        """Check if WeChat PC window is open and ready.
+
+        For WeChat platforms there is no browser-based login — the user just
+        needs the WeChat PC client running.  Returns True if the window is
+        found, False if the user aborts.
+        """
+        import ctypes
+        user32 = ctypes.windll.user32
+        VK_F8, VK_ESCAPE = 0x77, 0x1B
+
+        if self.window_mgr.find_window():
+            print(f"[{self.platform_name}] 微信窗口已检测到，无需额外登录操作。")
+            return True
+
+        print("\n" + "=" * 60)
+        print(f"  [{self.platform_name}] 未检测到微信窗口。")
+        print("  请打开微信 PC 客户端并登录。")
+        print("  打开后保持微信在前台，按 F8 继续（按 Esc 放弃）")
+        print("=" * 60)
+        user32.GetAsyncKeyState(VK_F8)
+        user32.GetAsyncKeyState(VK_ESCAPE)
+        while True:
+            if user32.GetAsyncKeyState(VK_F8) & 0x8000:
+                while user32.GetAsyncKeyState(VK_F8) & 0x8000:
+                    time.sleep(0.05)
+                if self.window_mgr.find_window():
+                    print(f"[{self.platform_name}] 微信窗口已就绪。")
+                    return True
+                print("  [提示] 仍未检测到微信窗口，请确认窗口已打开后按 F8 重试")
+                continue
+            if user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000:
+                while user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000:
+                    time.sleep(0.05)
+                print(f"[{self.platform_name}] 用户取消，微信平台将被跳过。")
+                return False
+            time.sleep(0.05)
+
+    async def login_interactive(self, wait_seconds: int = 300):
+        """WeChat PC login — delegate to wait_for_login window check."""
+        success = await self.wait_for_login(timeout=wait_seconds)
+        if not success:
+            raise RuntimeError(f"[{self.platform_name}] 微信窗口未就绪，登录取消。")
+
     async def scrape(self, url: str) -> dict:
         """Scrape comments from URL. Must be implemented by subclass."""
         raise NotImplementedError
@@ -675,3 +719,30 @@ class WechatPcBaseScraper:
         """Re-read window position (may have moved/resized)."""
         if self.window_mgr.is_found:
             self._rect = self.window_mgr.get_rect()
+
+    def reacquire_window(self) -> None:
+        """Re-identify the WeChat window from scratch.
+
+        Called before each URL to ensure coordinates are computed against
+        the correct window handle and position.  Between URLs the window
+        may have been resized (article side-panel open/close), moved, or
+        its HWND may have changed (WeChat recycles windows internally).
+
+        Resets the cached HWND, calls ``find_window()`` to re-acquire,
+        moves the window onto the primary monitor, and reads the current
+        rect.  Does NOT force-resize the window — that would disrupt
+        WeChat's internal layout and cause coordinate drift.
+        """
+        self.window_mgr._hwnd = None
+        if not self.window_mgr.find_window():
+            raise RuntimeError(
+                "微信窗口丢失。请确认微信 PC 客户端仍在运行。"
+            )
+        self.window_mgr.move_to_primary_screen()
+        self._rect = self.window_mgr.get_rect()
+        logger.info(
+            f"[{self.platform_name}] Re-acquired window: "
+            f"({self._rect.left}, {self._rect.top}) "
+            f"{self._rect.width}x{self._rect.height}"
+        )
+
