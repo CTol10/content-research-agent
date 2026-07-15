@@ -45,7 +45,7 @@ PLATFORM_PATTERNS: dict[str, list[str]] = {
     "douyin": ["iesdouyin.com", "douyin.com"],
     "xiaohongshu": ["xiaohongshu.com"],
     "wechat": ["mp.weixin.qq.com"],
-    "wechat_channels": ["channels.weixin.qq.com"],
+    "wechat_channels": ["channels.weixin.qq.com", "weixin.qq.com/sph"],
     "toutiao": ["toutiao.com"],
     "weibo": ["weibo.com"],
 }
