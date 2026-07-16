@@ -258,14 +258,24 @@ def _ensure_wechat_config(requested_platforms: set):
     if requested_platforms and not (requested_platforms & wechat_keys):
         return
 
-    from pathlib import Path as _Path
-    config_path = _Path("config.wechat_pc.json")
+    from scrapers.wechat import detect_version
+    version = detect_version()
+
+    if version == "4.1.7":
+        config_path = Path("config.wechat_pc_417.json")
+        calibrator_module = "scrapers.wechat.v417.calibrator"
+        calibrator_cls = "WechatCalibratorV417"
+    else:
+        config_path = Path("config.wechat_pc.json")
+        calibrator_module = "scrapers.wechat_calibrator"
+        calibrator_cls = "WechatCalibrator"
+
     if not config_path.exists():
         print("\n" + "=" * 60)
-        print("  检测到需要微信公众号/视频号功能，但未找到坐标配置文件。")
+        print(f"  检测到需要微信公众号/视频号功能（WeChat {version}），但未找到坐标配置文件。")
         print("  需要先校准微信窗口中的 UI 元素位置。")
         print("=" * 60)
-        _offer_calibration()
+        _offer_calibration_v2(version, calibrator_module, calibrator_cls)
         return
 
     try:
@@ -275,31 +285,34 @@ def _ensure_wechat_config(requested_platforms: set):
         profile = data.get("profiles", {}).get(profile_name, {})
         if not profile or "wechat_main" not in profile:
             print("\n" + "=" * 60)
-            print("  微信坐标配置不完整，需要重新校准。")
+            print(f"  微信坐标配置不完整（WeChat {version}），需要重新校准。")
             print("=" * 60)
-            _offer_calibration()
+            _offer_calibration_v2(version, calibrator_module, calibrator_cls)
     except Exception:
         print("\n" + "=" * 60)
-        print("  微信坐标配置文件损坏，需要重新校准。")
+        print(f"  微信坐标配置文件损坏（WeChat {version}），需要重新校准。")
         print("=" * 60)
-        _offer_calibration()
+        _offer_calibration_v2(version, calibrator_module, calibrator_cls)
 
 
-def _offer_calibration():
-    """Offer to run WeChat calibration interactively."""
+def _offer_calibration_v2(version: str, module_name: str, class_name: str):
+    """Offer to run version-appropriate WeChat calibration."""
+    print(f"  检测到 WeChat {version}，将使用对应版本的校准工具。")
     print("  请确保微信 PC 客户端已启动并登录。")
     print()
     try:
         answer = input("  是否现在开始校准？[Y/n] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
-        print("\n  已取消。请稍后手动运行: 评论抓取工具.exe --wechat-calibrate")
+        print("\n  已取消。请稍后手动运行校准工具。")
         sys.exit(1)
     if answer and answer not in ("y", "yes", ""):
-        print("  已跳过校准。请稍后手动运行: 评论抓取工具.exe --wechat-calibrate")
+        print("  已跳过校准。请稍后手动运行校准工具。")
         sys.exit(1)
     print()
-    from scrapers.wechat_calibrator import WechatCalibrator
-    calibrator = WechatCalibrator()
+    import importlib
+    mod = importlib.import_module(module_name)
+    calibrator_cls = getattr(mod, class_name)
+    calibrator = calibrator_cls()
     ok = calibrator.calibrate_all()
     if not ok:
         print("\n  校准未完成，无法继续。")
@@ -487,16 +500,15 @@ async def run_all(input_file, platforms_filter=None, resume=False, batch_size=0,
     import config
     from scrapers.douyin import DouyinScraper
     from scrapers.xiaohongshu import XiaohongshuScraper
-    from scrapers.wechat_official_pc import WechatOfficialPcScraper
-    from scrapers.wechat_channels_pc import WechatChannelsPcScraper
+    from scrapers.wechat import get_official_scraper, get_channels_scraper
     from scrapers.weibo import WeiboScraper
     from scrapers.toutiao import ToutiaoScraper
 
     scraper_classes = {
         "douyin": DouyinScraper,
         "xiaohongshu": XiaohongshuScraper,
-        "wechat": WechatOfficialPcScraper,
-        "wechat_channels": WechatChannelsPcScraper,
+        "wechat": lambda: get_official_scraper(),
+        "wechat_channels": lambda: get_channels_scraper(),
         "weibo": WeiboScraper,
         "toutiao": ToutiaoScraper,
     }
@@ -551,16 +563,15 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
     import config
     from scrapers.douyin import DouyinScraper
     from scrapers.xiaohongshu import XiaohongshuScraper
-    from scrapers.wechat_official_pc import WechatOfficialPcScraper
-    from scrapers.wechat_channels_pc import WechatChannelsPcScraper
+    from scrapers.wechat import get_official_scraper, get_channels_scraper
     from scrapers.toutiao import ToutiaoScraper
     from scrapers.weibo import WeiboScraper
 
     scraper_classes = {
         "douyin": DouyinScraper,
         "xiaohongshu": XiaohongshuScraper,
-        "wechat": WechatOfficialPcScraper,
-        "wechat_channels": WechatChannelsPcScraper,
+        "wechat": lambda: get_official_scraper(),
+        "wechat_channels": lambda: get_channels_scraper(),
         "toutiao": ToutiaoScraper,
         "weibo": WeiboScraper,
     }
@@ -655,9 +666,17 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
     # ── WeChat window check ──────────────────────────────────────
     wechat_needed = [p for p in needed_platforms if p in ("wechat", "wechat_channels")]
     if wechat_needed:
-        from scrapers.wechat_window_manager import WechatWindowManager
-        wm = WechatWindowManager()
-        if not wm.find_window():
+        from scrapers.wechat import detect_version
+        version = detect_version()
+        if version == "4.1.7":
+            from scrapers.wechat.v417.window_manager import WechatWindowManagerV417
+            wm = WechatWindowManagerV417()
+            window_found = wm.find_main()
+        else:
+            from scrapers.wechat_window_manager import WechatWindowManager
+            wm = WechatWindowManager()
+            window_found = wm.find_window()
+        if not window_found:
             print("\n" + "=" * 60)
             print("  [提示] 检测到需要抓取微信平台，但微信窗口未打开。")
             print("  请打开微信 PC 客户端并登录，然后按 Enter 继续...")
@@ -1006,8 +1025,14 @@ def main():
 
     # Handle --wechat-calibrate (before any run/login flow)
     if args.wechat_calibrate:
-        from scrapers.wechat_calibrator import WechatCalibrator
-        calibrator = WechatCalibrator()
+        from scrapers.wechat import detect_version
+        version = detect_version()
+        if version == "4.1.7":
+            from scrapers.wechat.v417.calibrator import WechatCalibratorV417
+            calibrator = WechatCalibratorV417()
+        else:
+            from scrapers.wechat_calibrator import WechatCalibrator
+            calibrator = WechatCalibrator()
         ok = calibrator.calibrate_all()
         sys.exit(0 if ok else 1)
 
