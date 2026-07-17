@@ -250,6 +250,14 @@ def read_input_excel(filepath) -> list[dict]:
     return rows
 
 
+def _resolve_config_path(filename: str) -> Path | None:
+    """Resolve a config file path — looks in CWD only."""
+    cwd_path = Path(filename)
+    if cwd_path.exists():
+        return cwd_path
+    return None
+
+
 def _ensure_wechat_config(requested_platforms: set):
     """Auto-check WeChat PC calibration config. Prompt to calibrate if missing."""
     wechat_keys = {"wechat", "wechat_channels"}
@@ -262,15 +270,34 @@ def _ensure_wechat_config(requested_platforms: set):
     version = detect_version()
 
     if version == "4.1.7":
-        config_path = Path("config.wechat_pc_417.json")
+        config_filename = "config.wechat_pc_417.json"
+        alt_config_filename = "config.wechat_pc.json"
         calibrator_module = "scrapers.wechat.v417.calibrator"
         calibrator_cls = "WechatCalibratorV417"
+        alt_version = "4.1.11"
     else:
-        config_path = Path("config.wechat_pc.json")
+        config_filename = "config.wechat_pc.json"
+        alt_config_filename = "config.wechat_pc_417.json"
         calibrator_module = "scrapers.wechat_calibrator"
         calibrator_cls = "WechatCalibrator"
+        alt_version = "4.1.7"
 
-    if not config_path.exists():
+    config_path = _resolve_config_path(config_filename)
+
+    # If the detected version's config doesn't exist, try the other version's config
+    if config_path is None:
+        config_path = _resolve_config_path(alt_config_filename)
+        if config_path is not None:
+            logger.info("检测到 %s 配置文件，切换为 %s 配置", alt_config_filename, alt_version)
+            if alt_version == "4.1.7":
+                calibrator_module = "scrapers.wechat.v417.calibrator"
+                calibrator_cls = "WechatCalibratorV417"
+            else:
+                calibrator_module = "scrapers.wechat_calibrator"
+                calibrator_cls = "WechatCalibrator"
+            version = alt_version
+
+    if config_path is None:
         print("\n" + "=" * 60)
         print(f"  检测到需要微信公众号/视频号功能（WeChat {version}），但未找到坐标配置文件。")
         print("  需要先校准微信窗口中的 UI 元素位置。")

@@ -25,8 +25,6 @@ a = Analysis(
     binaries=[],
     datas=[
         ('config.ini.example', '.'),
-        ('config.wechat_pc.json', '.'),
-        ('config.wechat_pc_417.json', '.'),
         ('input', 'input'),
     ] + _rapidocr_datas,
     hiddenimports=[
@@ -83,6 +81,9 @@ a = Analysis(
         'json',
         'urllib.parse',
         'httpx',
+        'httpcore',
+        'anyio',
+        'h11',
         'imageio_ffmpeg',
         'imageio',
         'hashlib',

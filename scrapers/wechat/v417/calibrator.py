@@ -95,6 +95,29 @@ CALIBRATION_STEPS = [
         ),
     },
     # ── Popup window: 视频号 ──
+    # NOTE: 倍速相关暂时挂起（录屏功能已注释）
+    # {
+    #     "section": "channels",
+    #     "key": "speed_button",
+    #     "type": "point",
+    #     "title": "视频号 - 倍速按钮（弹窗）",
+    #     "instructions": (
+    #         "在弹窗中打开一个视频号视频，\n"
+    #         "将鼠标移动到视频播放器中的【倍速按钮】位置\n"
+    #         "（悬浮此处会弹出倍速选项菜单）"
+    #     ),
+    # },
+    # {
+    #     "section": "channels",
+    #     "key": "speed_option",
+    #     "type": "point",
+    #     "title": "视频号 - 倍速选项 2.0x（弹窗）",
+    #     "instructions": (
+    #         "先将鼠标悬浮在倍速按钮上让菜单弹出，\n"
+    #         "然后将鼠标移动到菜单中的【2.0x 倍速选项】位置并记录\n"
+    #         "（如果不支持 2.0x，请记录最快的倍速选项）"
+    #     ),
+    # },
     {
         "section": "channels",
         "key": "pause_video",

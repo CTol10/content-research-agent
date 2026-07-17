@@ -639,14 +639,13 @@ def parse_response(response_text: str) -> dict:
         return default_result
 
 
-def classify_content(post_content: str, retries: int = 2, is_post_content: bool = False) -> dict:
+def classify_content(post_content: str, retries: int = 0, is_post_content: bool = False) -> dict:
     """Classify post content using MiMo-v2.5 API.
 
     Args:
         post_content: The post text to classify.
-        retries: Number of retries on empty/failed response. Defaults to 2.
-            For long post content, a higher value (3) is used automatically
-            since the API is less stable on long inputs.
+        retries: Number of retries on empty/failed response. Defaults to 0
+            (no retry — fails fast to fallback).
         is_post_content: True if the content is a long-form post (正文).
 
     Returns:
@@ -679,10 +678,7 @@ def classify_content(post_content: str, retries: int = 2, is_post_content: bool 
         api_content = content[:2000]
         logger.info(f"[classifier] Truncated long post {len(content)} -> 2000 chars")
 
-    # Long post content is less stable on the API — bump retries and max_tokens
-    if is_post_content and retries < 3:
-        retries = 3
-    # Ensure enough output room for many tags on long posts
+    # Long post content — ensure enough output room for many tags
     max_tokens = 1024 if is_post_content else 500
 
     default_result = {"tags": [], "has_comparison": "否"}
@@ -705,7 +701,7 @@ def classify_content(post_content: str, retries: int = 2, is_post_content: bool 
                     "max_tokens": max_tokens,
                     "response_format": {"type": "json_object"},
                 },
-                timeout=30,
+                timeout=10,
             )
             response.raise_for_status()
 

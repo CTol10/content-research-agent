@@ -46,12 +46,14 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
             if not self.window_mgr.wait_for_popup(timeout=15):
                 raise RuntimeError("视频弹窗未出现")
 
-            # Step 4: Activate popup, extract narration
+            # Step 4: Activate popup, pause, open comment panel, extract comments
             self.window_mgr.activate_popup()
             time.sleep(1.0)
-            narration = self._extract_narration()
+            # Narration recording temporarily disabled
+            # self._set_playback_speed()
+            # narration = self._extract_narration()
+            narration = ""
 
-            # Step 5: Pause, open comment panel, extract comments
             self._pause_video()
             self._open_comment_panel()
             comments = self._extract_comments()
@@ -74,7 +76,11 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
     # ── Navigation ─────────────────────────────────────────────────
 
     def _open_video(self, url: str) -> None:
-        """Open 视频号 URL via main window search bar."""
+        """Open 视频号 URL via main window search bar.
+
+        In 4.1.7, search creates a SEPARATE popup window containing
+        "访问网页" — must scan the popup, not the main window.
+        """
         # Two clicks on search bar
         self.click_key("wechat_main", "search_bar", "搜索栏")
         time.sleep(0.4)
@@ -85,14 +91,18 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
         self.paste_and_enter(url)
         time.sleep(2)
 
-        main_rect = self.window_mgr.get_main_rect()
+        # Wait for search results popup (4.1.7: separate Chrome_WidgetWin_0)
+        if not self.window_mgr.wait_for_popup(timeout=10):
+            raise RuntimeError("搜索结果弹窗未出现")
+        popup_rect = self.window_mgr.get_popup_rect()
         region = (
-            main_rect.left, main_rect.top,
-            main_rect.width, main_rect.height // 2,
+            popup_rect.left, popup_rect.top,
+            popup_rect.width, popup_rect.height // 2,
         )
         if not self.click_text_via_ocr("访问网页", region):
             logger.warning("[wechat_channels_v417] OCR missed '访问网页', trying coord")
-            self.click_key("wechat_main", "result_open_entry", "访问网页(兜底)")
+            # Fallback: use official.result_open_entry (popup coordinates)
+            self.click_key("official", "result_open_entry", "访问网页(兜底)")
 
         time.sleep(2)
 
@@ -100,6 +110,54 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
         """Click video area to pause."""
         self.click_key("channels", "pause_video", "暂停视频")
         time.sleep(1)
+
+    def _set_playback_speed(self) -> None:
+        """Hover over the speed button to reveal dropdown, then click 2.0x.
+
+        Uses two calibrated coordinates:
+          speed_button — hover target (reveals dropdown)
+          speed_option — click target (the 2.0x option in the menu)
+        Falls back to OCR if speed_option is not calibrated.
+        """
+        speed_cfg = self._profile.get("channels", {}).get("speed_button")
+        if not speed_cfg:
+            logger.info("[wechat_channels_v417] speed_button not calibrated, skipping")
+            return
+
+        # Step 1: Hover over the speed button to reveal dropdown
+        x, y = self.resolve_point("channels", "speed_button")
+        logger.debug(f"[wechat_channels_v417] Hover speed button ({x}, {y})")
+        pyautogui.moveTo(x, y, duration=0.2)
+        time.sleep(0.5)
+
+        # Step 2: Click the speed option (coord or OCR fallback)
+        option_cfg = self._profile.get("channels", {}).get("speed_option")
+        if option_cfg:
+            self.click_key("channels", "speed_option", "倍速选项 2.0x")
+            logger.info("[wechat_channels_v417] Set playback speed via calibrated coord")
+        else:
+            # OCR fallback: scan popup for speed text
+            popup_rect = self.window_mgr.get_popup_rect()
+            region = (
+                popup_rect.left,
+                popup_rect.top + popup_rect.height // 3,
+                popup_rect.width,
+                popup_rect.height * 2 // 3,
+            )
+            for text in ["2.0x", "2x", "2.0", "2X"]:
+                if self.click_text_via_ocr(text, region):
+                    logger.info(f"[wechat_channels_v417] Set playback speed to {text}")
+                    break
+            else:
+                logger.warning("[wechat_channels_v417] Could not find speed option")
+        time.sleep(0.5)
+
+        # Move mouse to video center to dismiss speed dropdown
+        try:
+            vx, vy = self.resolve_point("channels", "pause_video")
+            pyautogui.moveTo(vx, vy, duration=0.2)
+        except Exception:
+            pass
 
     def _open_comment_panel(self) -> None:
         """Click the comment button in the popup."""
@@ -232,9 +290,11 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
         try:
             video_ended = self._detect_video_end(region, max_duration)
         finally:
-            if video_ended:
-                logger.info("[wechat_channels_v417] Pausing to prevent auto-advance")
-                self._pause_video()
+            # Always pause — if the video ended naturally (stillness) or
+            # auto-advanced to the next one (no stillness), we need to stop
+            # playback to prevent the next video from playing.
+            logger.info("[wechat_channels_v417] Pausing video after recording")
+            self._pause_video()
             try:
                 proc.stdin.write(b"q")
                 proc.stdin.flush()
@@ -359,6 +419,12 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
         pyautogui.moveTo(cx, cy, duration=0.1)
         time.sleep(0.2)
 
+        # Click top-right corner to focus the comment panel (safe from links/images)
+        focus_x = region_left + region_w - 10
+        focus_y = region_top + 10
+        pyautogui.click(focus_x, focus_y)
+        time.sleep(0.3)
+
         px_per_click = self._measure_px_per_click(
             region_left, region_top, region_w, region_h, cx, cy,
         )
@@ -385,13 +451,15 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
                     time.sleep(0.3)
                 total_expanded += len(buttons)
                 time.sleep(0.8)
+                # Expanding adds new content, reset stale counter
+                no_change_count = 0
 
             batch = self.ocr_region("channels", "comment_panel_region", f"comments_{i:02d}")
             raw.extend(batch)
 
             if len(batch) == 0:
                 no_change_count += 1
-                if no_change_count >= 3:
+                if no_change_count >= 5:
                     break
             else:
                 no_change_count = 0
