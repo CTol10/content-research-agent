@@ -49,15 +49,15 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
             # Step 4: Activate popup, pause, open comment panel, extract comments
             self.window_mgr.activate_popup()
             time.sleep(1.0)
-            # Narration recording temporarily disabled
-            # self._set_playback_speed()
-            # narration = self._extract_narration()
-            narration = ""
 
             self._pause_video()
             self._open_comment_panel()
             comments = self._extract_comments()
             logger.info(f"[wechat_channels_v417] Total comments: {len(comments)}")
+
+            # Step 5: 口播 —— OCR 评论后用在线解析(parse_narration)替代录屏
+            # （sph 链接 → 元宝解析 → finder-preview → ffmpeg 提音频 → MiMo）
+            narration = await self._fetch_narration_online(url)
 
             self.take_screenshot("final")
 
@@ -348,6 +348,44 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
         if transcription:
             logger.info(f"[wechat_channels_v417] Narration: {len(transcription)} chars")
         return transcription
+
+    async def _fetch_narration_online(self, url: str) -> str:
+        """在线解析视频号口播（sph 链接 → 元宝 → finder-preview → MiMo）。
+
+        OCR 评论完成后调用，替代录屏。只支持 sph 分享链接；非 sph（如纯
+        feedID URL）返回 ""。元宝 cookie 从登录态 profile 自动读取，
+        MIMO_API_KEY 走 config.ini，缺则返回 ""。
+        """
+        import asyncio
+        try:
+            from scrapers.wechat.channels_sph_parser import (
+                ChannelsSphParser, is_sph_url, _load_cookie_from_profile,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[wechat_channels_v417] 口播解析模块不可用: {e}")
+            return ""
+        if not is_sph_url(url):
+            logger.info(f"[wechat_channels_v417] 非 sph 链接，跳过在线口播: {url[:60]}")
+            return ""
+        cookie = await _load_cookie_from_profile()
+        if not cookie:
+            return ""
+        try:
+            parser = ChannelsSphParser(cookie=cookie)
+            data = await asyncio.to_thread(parser.parse_narration, url)
+            if not data:
+                logger.warning(f"[wechat_channels_v417] 在线口播解析为空: {url[:60]}")
+                return ""
+            narration = data.get("narration", "")
+            if narration:
+                logger.info(
+                    f"[wechat_channels_v417] 口播 {len(narration)}字, "
+                    f"author={data.get('author','')[:16]!r}"
+                )
+            return narration
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[wechat_channels_v417] 在线口播解析失败: {e}")
+            return ""
 
     @staticmethod
     def _cleanup_file(path: str) -> None:

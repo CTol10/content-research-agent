@@ -845,26 +845,35 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
                             print("跳过")
 
                     # Determine content display for Sheet 3
+                    # transcription 来源：抖音走 video_processor；
+                    # 视频号由 scrape() 经 parse_narration 自带 result["narration"]
+                    # （OCR 评论后在线解析，替代录屏）
+                    transcription = ""
+                    video_summary = ""
                     if video_result and video_result["status"] in ("success", "no_analysis", "analysis_failed"):
                         transcription = video_result.get("transcription", "")
-                        parts = []
-                        if post_content:
-                            parts.append(f"正文：{post_content}")
-                        if transcription:
-                            parts.append(f"口播：{transcription}")
-                        if parts:
-                            content_display = "\n".join(parts)
-                        else:
-                            content_display = f"{video_result['label']}\n\n{video_result['summary']}"
-                        # Use transcription for tagging if available, fallback to summary/post
-                        if transcription:
-                            classify_text = transcription
-                        elif video_result["status"] == "success":
-                            classify_text = video_result["summary"]
-                        else:
-                            classify_text = post_content
+                        video_summary = video_result.get("summary", "")
+                    if not transcription and result.get("narration"):
+                        transcription = result["narration"]
+
+                    parts = []
+                    if post_content:
+                        parts.append(f"正文：{post_content}")
+                    if transcription:
+                        parts.append(f"口播：{transcription}")
+                    if parts:
+                        content_display = "\n".join(parts)
+                    elif video_result:
+                        content_display = f"{video_result['label']}\n\n{video_summary}"
                     else:
-                        content_display = post_content
+                        content_display = ""
+
+                    # Use transcription for tagging if available, fallback to summary/post
+                    if transcription:
+                        classify_text = transcription
+                    elif video_result and video_result["status"] == "success":
+                        classify_text = video_summary
+                    else:
                         classify_text = post_content
 
                     # Write post content to Excel (one row per tag)
@@ -1016,6 +1025,8 @@ def main():
     parser.add_argument("--login", action="store_true", help="交互式登录各平台并保存Cookie")
     parser.add_argument("--login-open", action="store_true", help="打开登录浏览器（不阻塞，登录后需运行 --login-save）")
     parser.add_argument("--login-save", action="store_true", help="保存已打开浏览器的Cookie")
+    parser.add_argument("--login-yuanbao", action="store_true",
+                        help="交互式登录腾讯元宝（视频号在线解析 sph 链接所需 cookie，存入 config.ini）")
     parser.add_argument("--platforms", default="", help="指定平台(逗号分隔): douyin,xiaohongshu,weibo,toutiao")
     parser.add_argument("--input", default="", help="输入Excel文件路径")
     parser.add_argument("--resume", action="store_true", help="从上次中断处继续抓取（跳过已完成的URL）")
@@ -1064,7 +1075,7 @@ def main():
         sys.exit(0 if ok else 1)
 
     # Pre-check: if WeChat platforms are requested, ensure calibration exists
-    if args.run or not args.login_open and not args.login_save and not args.login:
+    if args.run or not args.login_open and not args.login_save and not args.login and not args.login_yuanbao:
         # Determine which platforms will be used
         if args.platforms:
             requested = set(p.strip() for p in args.platforms.split(",") if p.strip())
@@ -1110,6 +1121,10 @@ def main():
         else:
             platform_list = all_platforms
         asyncio.run(login_open_all(platform_list))
+    elif args.login_yuanbao:
+        from scrapers.wechat.channels_sph_parser import ChannelsSphParser
+        ok = asyncio.run(ChannelsSphParser.login_interactive(wait_seconds=args.login_timeout))
+        sys.exit(0 if ok else 1)
     else:
         platforms_filter = None
         if args.platforms:

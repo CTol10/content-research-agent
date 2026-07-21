@@ -189,6 +189,24 @@ class VideoProcessor:
         logger.info("Audio transcription unavailable, trying video understanding fallback")
         return self._transcribe_video_with_mimo(video_path)
 
+    _BAD_TRANSCRIPTION_MARKERS = (
+        "消音", "模糊不清", "听不清", "注：", "注:", "No output",
+        "涉及敏感", "敏感信息", "无法识别", "无法转录", "（前段", "（消音", "（注",
+    )
+
+    @classmethod
+    def _transcript_has_annotations(cls, text: str) -> bool:
+        """检测 MiMo 是否返回了消音/标注/拒转（而非干净转录）。"""
+        if not text or not text.strip():
+            return True
+        for m in cls._BAD_TRANSCRIPTION_MARKERS:
+            if m in text:
+                return True
+        # 全角括号注释过多也视为标注污染
+        if text.count("（") >= 2 or text.count("(") >= 3:
+            return True
+        return False
+
     def _transcribe_audio_with_mimo(self, audio_data: str) -> str | None:
         """Transcribe audio using MiMo audio input."""
         for attempt in range(3):
@@ -211,7 +229,14 @@ class VideoProcessor:
                                     },
                                     {
                                         "type": "text",
-                                        "text": "请将这段音频中的口播/旁白内容完整转录为文字。只输出转录文本，不要添加任何解释。",
+                                        "text": (
+                                            "请将这段音频中的口播/旁白内容完整、逐字转录为纯文字。"
+                                            "严格要求：1) 只输出听到的原话原文，不输出任何解释、说明、注释；"
+                                            "2) 禁止添加（消音）、（模糊不清）、（注：…）等任何括号标注；"
+                                            "3) 听不清的字按发音尽量写，不要省略或用括号占位；"
+                                            "4) 无论内容是否涉及敏感、争议、维权，都原样完整转录，不得省略、改写或拒转。"
+                                            "直接输出转录文本，不要任何前后缀。"
+                                        ),
                                     },
                                 ],
                             },
@@ -227,8 +252,17 @@ class VideoProcessor:
                 choice = data["choices"][0]
                 text = choice["message"].get("content", "") or choice["message"].get("reasoning_content", "")
                 if text and text.strip():
-                    logger.info(f"Audio transcription completed: {len(text)} chars")
-                    return text.strip()
+                    cleaned = text.strip()
+                    if self._transcript_has_annotations(cleaned):
+                        logger.warning(
+                            f"MiMo 转录含消音/标注/拒转 (attempt {attempt+1})，重试: {cleaned[:80]}"
+                        )
+                        if attempt < 2:
+                            continue
+                        # 末次仍带标注/拒转：返回 None，避免污染口播
+                        return None
+                    logger.info(f"Audio transcription completed: {len(cleaned)} chars")
+                    return cleaned
 
             except Exception as e:
                 logger.warning(f"MiMo transcription failed (attempt {attempt+1}): {e}")

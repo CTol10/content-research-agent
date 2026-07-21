@@ -44,6 +44,8 @@ a = Analysis(
         'scrapers.wechat_calibrator',
         'scrapers.wechat',
         'scrapers.wechat.ocr',
+        'scrapers.wechat.official_article_fetcher',
+        'scrapers.wechat.channels_sph_parser',
         'scrapers.wechat.v411',
         'scrapers.wechat.v411.base',
         'scrapers.wechat.v411.official_pc',

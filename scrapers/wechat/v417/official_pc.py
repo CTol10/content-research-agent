@@ -59,8 +59,9 @@ class WechatOfficialPcScraperV417(WechatPcBaseScraperV417):
             comments = self._extract_comments()
             logger.info(f"[wechat_v417] Total comments: {len(comments)}")
 
-            # Step 7: Extract post content
-            post_content = self._extract_post_content()
+            # Step 7: 抓正文 —— OCR 评论后用 web 直取(裸 HTTP)替代 OCR 取正文
+            # （公众号文章 HTML 服务端渲染，无需 cookie/元宝/微信客户端）
+            post_content = self._fetch_post_content_online(url)
 
             self.take_screenshot("final")
 
@@ -269,6 +270,26 @@ class WechatOfficialPcScraperV417(WechatPcBaseScraperV417):
             return "\n".join(filtered[:50])
         except Exception as e:
             logger.warning(f"[wechat_v417] Content extraction failed: {e}")
+            return ""
+
+    def _fetch_post_content_online(self, url: str) -> str:
+        """web 直取公众号正文（裸 HTTP，无需 cookie/元宝/微信客户端）。
+
+        OCR 评论完成后调用；命中验证页/异常返回 ""。比 OCR `_extract_post_content`
+        （只取评论区前 50 行）拿到的是完整干净正文。
+        """
+        try:
+            from scrapers.wechat.official_article_fetcher import fetch_article_body
+            data = fetch_article_body(url)
+            if not data:
+                logger.warning(f"[wechat_v417] web 直取正文为空: {url[:60]}")
+                return ""
+            logger.info(
+                f"[wechat_v417] 正文 {len(data['body'])}字, author={data.get('author','')[:16]!r}"
+            )
+            return data.get("body", "")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[wechat_v417] web 直取正文失败: {e}")
             return ""
 
     # ── Scrollbar helpers (aligned with 4.1.11 base) ────────────────
