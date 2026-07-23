@@ -440,7 +440,7 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
         return px_per_click
 
     def _extract_comments(
-        self, max_scrolls: int = 20, scroll_fraction: float = 0.67,
+        self, max_scrolls: int = 80, scroll_fraction: float = 0.67,
     ) -> list[tuple[str, str]]:
         """OCR extract comments from the popup comment panel."""
         from scrapers.wechat.ocr import merge_comment_fragments
@@ -474,6 +474,11 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
             f"(target={target_px}px, measured={px_per_click:.1f} px/click)"
         )
 
+        # 取基线截图，用于"到底检测"（滚动后视图不变 = 到底）
+        prev_img = self.screenshot_region_as_image(
+            "channels", "comment_panel_region", "scroll_00_before"
+        )
+
         for i in range(max_scrolls):
             # Expand replies
             buttons = self.find_expand_buttons(
@@ -504,6 +509,18 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
 
             pyautogui.scroll(-scroll_clicks, x=cx, y=cy)
             time.sleep(1.5)
+
+            # 到底检测：滚动后截图与上一屏几乎一致 = 到底了（展开会让视图变化，不会误判）
+            curr_img = self.screenshot_region_as_image(
+                "channels", "comment_panel_region", f"scroll_{i:02d}_after"
+            )
+            if self.images_similar(prev_img, curr_img):
+                logger.info(
+                    f"[wechat_channels_v417] Scroll {i+1}: no change — "
+                    f"reached bottom ({total_expanded} expanded)"
+                )
+                break
+            prev_img = curr_img
 
             if i > 0 and i % 5 == 4:
                 logger.debug(

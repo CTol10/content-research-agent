@@ -716,6 +716,25 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
                 print("\n用户取消。")
                 return
 
+        # ── 元宝登录态检查（视频号口播在线解析所需）──
+        # 直接跑抓取（--run）时若缺 _yuanbao_profile，提示扫码登录，不必单独 --login。
+        if "wechat_channels" in needed_platforms:
+            from scrapers.wechat.channels_sph_parser import ChannelsSphParser
+            yuanbao_profile = config.COOKIE_DIR / "_yuanbao_profile"
+            if not yuanbao_profile.exists():
+                print("\n" + "=" * 56)
+                print("  视频号口播在线解析需要腾讯元宝登录态")
+                print("  未检测到 cookies/_yuanbao_profile，现在扫码登录？[Y/n]")
+                print("=" * 56)
+                try:
+                    _yb_ans = input().strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    _yb_ans = ""
+                if _yb_ans in ("", "y", "yes"):
+                    await ChannelsSphParser.login_interactive(wait_seconds=300)
+                else:
+                    print("  跳过——视频号口播将为空（之后可用 --login 单独登录元宝）。")
+
     results = []
     success_count = 0
     fail_count = 0
@@ -798,10 +817,17 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
                     platform_name = _PLATFORM_DISPLAY.get(platform_key, platform_key)
 
                     # Write comments to Excel (one row per tag)
+                    written_in_url = 0
+                    dropped_in_url = 0
                     for ci, (_, content) in enumerate(comments):
                         # Clean comment content: strip reply prefix, metadata, etc.
+                        raw_repr = repr(content)[:80] if content is not None else "None"
                         cleaned_content = clean_comment_content(content, platform=platform_key)
                         if not cleaned_content:
+                            dropped_in_url += 1
+                            logger.warning(
+                                f"[{platform_key}] 评论被清洗丢弃 ci={ci+1}/{len(comments)} raw={raw_repr}"
+                            )
                             continue  # skip empty/meaningless comments after cleaning
 
                         expanded = []
@@ -819,6 +845,13 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
                         else:
                             ws_comments.append([comment_counter, "中性", "/", "否", cleaned_content, platform_name])
                         comment_counter += 1
+                        written_in_url += 1
+
+                    if len(comments):
+                        logger.info(
+                            f"[{platform_key}] 评论写入统计: raw={len(comments)} "
+                            f"written={written_in_url} dropped={dropped_in_url}"
+                        )
 
                     # Video processing
                     video_result = None
@@ -1026,7 +1059,8 @@ def main():
     parser.add_argument("--login-open", action="store_true", help="打开登录浏览器（不阻塞，登录后需运行 --login-save）")
     parser.add_argument("--login-save", action="store_true", help="保存已打开浏览器的Cookie")
     parser.add_argument("--login-yuanbao", action="store_true",
-                        help="交互式登录腾讯元宝（视频号在线解析 sph 链接所需 cookie，存入 config.ini）")
+                        help="单独登录腾讯元宝（视频号口播在线解析所需 cookie，存入 cookies/_yuanbao_profile）。"
+                             "注：--login（全平台）已自动包含元宝登录，无需单独跑")
     parser.add_argument("--platforms", default="", help="指定平台(逗号分隔): douyin,xiaohongshu,weibo,toutiao")
     parser.add_argument("--input", default="", help="输入Excel文件路径")
     parser.add_argument("--resume", action="store_true", help="从上次中断处继续抓取（跳过已完成的URL）")
@@ -1121,6 +1155,19 @@ def main():
         else:
             platform_list = all_platforms
         asyncio.run(login_open_all(platform_list))
+        # 元宝登录与平台登录一并完成：视频号口播在线解析所需 cookie 存入
+        # cookies/_yuanbao_profile（持久化 profile，不走 config.ini）。
+        # 默认全平台、或 --platforms 含 wechat/wechat_channels 时触发。
+        _want_yuanbao = (not args.platforms) or any(
+            p in platform_list for p in ("wechat", "wechat_channels")
+        )
+        if _want_yuanbao:
+            from scrapers.wechat.channels_sph_parser import ChannelsSphParser
+            print("\n" + "=" * 56)
+            print("  接下来登录腾讯元宝（视频号口播在线解析所需）")
+            print("  扫码登录后自动检测并保存，或回终端按 Enter 确认")
+            print("=" * 56)
+            asyncio.run(ChannelsSphParser.login_interactive(wait_seconds=args.login_timeout))
     elif args.login_yuanbao:
         from scrapers.wechat.channels_sph_parser import ChannelsSphParser
         ok = asyncio.run(ChannelsSphParser.login_interactive(wait_seconds=args.login_timeout))

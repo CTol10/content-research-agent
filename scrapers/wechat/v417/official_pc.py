@@ -109,7 +109,7 @@ class WechatOfficialPcScraperV417(WechatPcBaseScraperV417):
 
     # ── Scrolling + expand ─────────────────────────────────────────
 
-    def _scroll_and_expand_comments(self, max_scrolls: int = 40) -> None:
+    def _scroll_and_expand_comments(self, max_scrolls: int = 80) -> None:
         """Scroll through comments in the popup, clicking expand buttons."""
         region_left, region_top, region_w, region_h = \
             self.resolve_region("official", "comment_region")
@@ -226,7 +226,7 @@ class WechatOfficialPcScraperV417(WechatPcBaseScraperV417):
             "official", "comment_region", "extract_00"
         )
 
-        for i in range(40):
+        for i in range(80):
             batch = self.ocr_region("official", "comment_region", f"extract_{i:02d}")
             raw.extend(batch)
             logger.debug(

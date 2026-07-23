@@ -149,17 +149,8 @@ CALIBRATION_STEPS = [
             "第二次按 F8: 记录评论面板【右下角】"
         ),
     },
-    {
-        "section": "channels",
-        "key": "video_area",
-        "type": "region",
-        "title": "视频号 - 视频播放区域（弹窗）",
-        "instructions": (
-            "在弹窗中（评论面板关闭状态），\n"
-            "第一次按 F8: 记录视频播放区域【左上角】\n"
-            "第二次按 F8: 记录视频播放区域【右下角】"
-        ),
-    },
+    # NOTE: video_area（视频播放区域）已移除——视频号口播改在线解析
+    # (sph→元宝→finder-preview→MiMo)，录屏路径 _extract_narration 不再调用。
 ]
 
 

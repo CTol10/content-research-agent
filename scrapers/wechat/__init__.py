@@ -16,6 +16,8 @@ import ctypes.wintypes
 import logging
 import subprocess
 
+import config
+
 from scrapers.wechat.v411 import (
     WechatChannelsPcScraper as ChannelsV411,
     WechatOfficialPcScraper as OfficialV411,
@@ -30,26 +32,55 @@ from scrapers.wechat.v417 import (
 logger = logging.getLogger(__name__)
 
 
-def detect_version() -> str:
-    """Detect the running WeChat version.
+_VERSION_CACHE: str | None = None
 
-    Returns:
-        "4.1.7" or "4.1.11"
+
+def _infer_version_by_config() -> str:
+    """检测不到微信窗口时，按已校准的配置文件推断版本。
+
+    dist 里有 config.wechat_pc_417.json → 4.1.7；否则看 config.wechat_pc.json。
+    避免 4.1.7 用户在 Qt 主窗口不可见（最小化/未前台）时被误判 4.1.11 →
+    误走 v411 → 找 config.wechat_pc.json（没有）→ 空配置启动失败。
     """
+    try:
+        if (config.BASE_DIR / "config.wechat_pc_417.json").exists():
+            return "4.1.7"
+        if (config.BASE_DIR / "config.wechat_pc.json").exists():
+            return "4.1.11"
+    except Exception:  # noqa: BLE001
+        pass
+    return "4.1.11"
+
+
+def detect_version() -> str:
+    """Detect the running WeChat version. Returns "4.1.7" or "4.1.11".
+
+    结果进程级缓存——一次检测、全局复用。之前公众号/视频号 scraper 各自
+    实例化时各调一次 detect_version，窗口可见性飘忽会让两次返回不一致
+    （一次 4.1.7、一次 4.1.11），scraper 选错版本 → 找不到对应 config。
+    缓存后全局一致，符合"一开始检测一次、之后复用"。检测不到窗口时按
+    config 文件推断，不再硬默认 4.1.11。
+    """
+    global _VERSION_CACHE
+    if _VERSION_CACHE is not None:
+        return _VERSION_CACHE
+
     user32 = ctypes.windll.user32
 
     # Check for 4.1.7: Qt-based main window
     hwnd = user32.FindWindowW("Qt51514QWindowIcon", None)
     if hwnd and user32.IsWindowVisible(hwnd):
+        _VERSION_CACHE = "4.1.7"
         logger.info("[wechat] Detected 4.1.7 (Qt main window)")
-        return "4.1.7"
+        return _VERSION_CACHE
 
     # Also check for other Qt versions
     for qt_class in ["Qt51514QWindowIcon", "Qt514QWindowIcon", "Qt5QWindowIcon"]:
         hwnd = user32.FindWindowW(qt_class, None)
         if hwnd and user32.IsWindowVisible(hwnd):
+            _VERSION_CACHE = "4.1.7"
             logger.info(f"[wechat] Detected 4.1.7 ({qt_class})")
-            return "4.1.7"
+            return _VERSION_CACHE
 
     # Check for 4.1.11: WeChatMainWndForPC / WeixinMainWndForPC
     for class_name in [
@@ -58,16 +89,17 @@ def detect_version() -> str:
     ]:
         hwnd = user32.FindWindowW(class_name, None)
         if hwnd and user32.IsWindowVisible(hwnd):
+            _VERSION_CACHE = "4.1.11"
             logger.info(f"[wechat] Detected 4.1.11 ({class_name})")
-            return "4.1.11"
+            return _VERSION_CACHE
 
-    # Fallback: check by process name → scan all windows by title
+    # Fallback: 扫描 WeChat 进程的可见窗口找 Qt 类；仍找不到 Qt 窗口则按 config 推断
     wechat_pids = _find_wechat_pids()
     if wechat_pids:
         EnumWindowsProc = ctypes.WINFUNCTYPE(
             ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM,
         )
-        result = {"version": "4.1.11"}  # default
+        found = {"version": None}
 
         def callback(hwnd, _lparam):
             pid = ctypes.wintypes.DWORD()
@@ -78,19 +110,23 @@ def detect_version() -> str:
                 return True
             class_buf = ctypes.create_unicode_buffer(256)
             user32.GetClassNameW(hwnd, class_buf, 256)
-            cls = class_buf.value
-            if "Qt" in cls:
-                result["version"] = "4.1.7"
+            if "Qt" in class_buf.value:
+                found["version"] = "4.1.7"
                 return False  # stop enumeration
             return True
 
         user32.EnumWindows(EnumWindowsProc(callback), 0)
-        version = result["version"]
-        logger.info(f"[wechat] Detected {version} (fallback via process)")
-        return version
+        if found["version"]:
+            _VERSION_CACHE = found["version"]
+            logger.info(f"[wechat] Detected {_VERSION_CACHE} (fallback via process)")
+            return _VERSION_CACHE
 
-    logger.warning("[wechat] Could not detect WeChat version, defaulting to 4.1.11")
-    return "4.1.11"
+    # 窗口检测不到：按已校准 config 文件推断版本（不再硬默认 4.1.11）
+    _VERSION_CACHE = _infer_version_by_config()
+    logger.warning(
+        f"[wechat] 未检测到微信窗口，按 config 文件推断版本为 {_VERSION_CACHE}"
+    )
+    return _VERSION_CACHE
 
 
 def _find_wechat_pids() -> set[int]:

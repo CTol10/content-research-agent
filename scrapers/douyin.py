@@ -339,83 +339,65 @@ class DouyinScraper(BaseScraper):
                     const items = document.querySelectorAll('[data-e2e="comment-item"]');
                     const normalize = (text) => (text || '').replace(/\\u00a0/g, ' ').trim();
 
+                    // 通用 content 抽取：不依赖混淆类名。
+                    // isMeta: 判一个元素文本是否是纯元数据（时间戳/地点/点赞数/按钮/省略号）
+                    const isMeta = (t) => {
+                        if (!t) return true;
+                        if (/^\\d+$/.test(t)) return true;                                    // 纯数字（点赞数）
+                        if (/^\\.{2,}$/.test(t)) return true;                                  // "..." 等省略号（更多菜单残留）
+                        if (/^(刚刚|\\d+\\s*(分钟|秒钟|秒|分|小时|天|周|月|年)前)(\\s*[·•]\\s*\\S+)?$/.test(t)) return true;  // 时间戳
+                        if (/^[·•]\\s*\\S+$/.test(t)) return true;                             // 单独地点
+                        if (/^(展开|收起|分享|回复|查看更多|点赞|更多|置顶|作者|播放中|IP属地)[:：]?\\S*$/.test(t)) return true;
+                        return false;
+                    };
+                    // extractContent: 通用兜底——不假设正文在哪一级、不碰混淆类名。
+                    //   1) 若抖音给正文加了稳定 data-e2e，优先用它；
+                    //   2) 否则克隆后剥掉"已知非正文元素"（头像/stats/昵称/更多菜单/回复容器/按钮/svg/img/链接/嵌套评论），
+                    //      再剥掉整段是元数据的 div/span，取剩余文本。只依赖稳定选择器与文本语义。
+                    const extractContent = (item, nickname) => {
+                        const byE2e = item.querySelector(
+                            '[data-e2e="comment-content"], [data-e2e="comment-desc"], ' +
+                            '[data-e2e="comment-text"], [data-e2e="comment-text-content"]'
+                        );
+                        if (byE2e) {
+                            const t = normalize(byE2e.textContent || '');
+                            if (t && !isMeta(t)) return t;
+                        }
+                        const clone = item.cloneNode(true);
+                        clone.querySelectorAll('[data-e2e="comment-item"]').forEach(el => { if (el !== clone) el.remove(); });
+                        clone.querySelectorAll(
+                            '.comment-item-avatar, .comment-item-stats-container, ' +
+                            '[data-click-from="title"], [data-e2e="video-comment-more"], ' +
+                            '[class*="replyContainer"], [class*="reply-container"], [class*="reply_wrap"], ' +
+                            'svg, button, img, a'
+                        ).forEach(el => el.remove());
+                        clone.querySelectorAll('div, span').forEach(el => {
+                            if (isMeta(normalize(el.textContent || ''))) el.remove();
+                        });
+                        let text = normalize(clone.textContent || '');
+                        text = text.replace(/\\s*\\d+\\s*(分钟|秒钟|秒|分|小时|天|周|月|年)前(\\s*[·•]\\s*\\S+)?/g, '').trim();
+                        text = text.replace(/\\s*[·•]\\s*\\S+$/g, '').trim();
+                        if (nickname && text === nickname) return '';
+                        return text;
+                    };
+
                     return Array.from(items).map(item => {
                         const nickEl = item.querySelector('[data-click-from="title"]');
                         const nickname = nickEl ? normalize(nickEl.textContent || '') : '';
-
-                        // Primary: use the content container inside .Sbe6bqNb
-                        const contentWrap = item.querySelector('.Sbe6bqNb');
-                        let content = '';
-                        let hasImage = false;
-
-                        if (contentWrap) {
-                            // Extract text from .LqTo7UJT (the actual comment text element)
-                            // Use textContent on this element only — it contains just this
-                            // comment's text, not nested replies.
-                            const contentSpan = contentWrap.querySelector('.LqTo7UJT');
-                            content = contentSpan ? normalize(contentSpan.textContent || '') : '';
-
-                            // Check for non-emoji images (larger than 20px) in the content area
-                            const images = contentWrap.querySelectorAll('img');
-                            for (const img of images) {
-                                if (img.width > 20 || img.height > 20) {
-                                    hasImage = true;
-                                    break;
-                                }
-                            }
-
-                            // If no text but has image, use placeholder
-                            if (!content && hasImage) {
-                                content = '[图片]';
-                            }
-                        }
-
-                        // Fallback: extract text WITHOUT nested reply content
-                        // Clone the item and strip reply containers first to avoid
-                        // including concatenated reply thread text.
-                        if (!content) {
-                            const clone = item.cloneNode(true);
-                            // Remove nested reply containers so innerText only
-                            // reflects THIS comment's text
-                            const replyContainers = clone.querySelectorAll(
-                                '.replyContainer, [class*="replyContainer"], ' +
-                                '[class*="reply-container"], [class*="reply_wrap"]'
-                            );
-                            replyContainers.forEach(el => el.remove());
-                            // Also remove "展开" / "收起" buttons
-                            clone.querySelectorAll('button').forEach(btn => {
-                                const t = (btn.textContent || '').trim();
-                                if (t.includes('展开') || t.includes('收起') || t.includes('回复')) {
-                                    btn.remove();
-                                }
-                            });
-
-                            const raw = normalize(clone.innerText || clone.textContent || '');
-                            const lines = raw.split(/\\n+/).map(s => normalize(s)).filter(Boolean);
-                            const bad = ['分享', '回复', '小时前', '天前', '周前', '刚刚',
-                                         '置顶', '作者', '展开', '收起', '查看更多', '播放中'];
-                            const filtered = [];
-                            for (const line of lines) {
-                                if (!line) continue;
-                                if (nickname && line === nickname) continue;
-                                if (/^\\.+$/.test(line)) continue;
-                                if (/^\\d+$/.test(line)) continue;
-                                if (bad.some(b => line.includes(b))) continue;
-                                filtered.push(line);
-                            }
-                            content = filtered.join(' ').trim();
-                        }
+                        const content = extractContent(item, nickname);
 
                         // Find parent comment for reply items (nested inside .replyContainer)
                         let parentRef = '';
-                        const replyContainer = item.closest('.replyContainer');
+                        const replyContainer = item.closest(
+                            '.replyContainer, [class*="replyContainer"], ' +
+                            '[class*="reply-container"], [class*="reply_wrap"]'
+                        );
                         if (replyContainer) {
                             const parentItem = replyContainer.closest('[data-e2e="comment-item"]');
                             if (parentItem && parentItem !== item) {
                                 const pNickEl = parentItem.querySelector('[data-click-from="title"]');
                                 const pNick = pNickEl ? normalize(pNickEl.textContent || '') : '';
-                                const pWrap = parentItem.querySelector('.Sbe6bqNb .LqTo7UJT');
-                                const pContent = pWrap ? normalize(pWrap.textContent || '') : '';
+                                const pContent = extractContent(parentItem, pNick);
                                 if (pNick || pContent) {
                                     parentRef = pNick + ':' + pContent.substring(0, 30);
                                 }
@@ -577,18 +559,15 @@ class DouyinScraper(BaseScraper):
 
     async def _extract_post_content(self, page) -> str:
         """Extract post content from the video info area."""
-        # Step 1: Click expand button if present to reveal full content
+        # Step 1: Click 展开 to reveal full content（图文帖无 note-detail，按文字找展开按钮）
         await page.evaluate("""
             () => {
-                // Find and click expand button in note-detail
-                const noteDetail = document.querySelector('[data-e2e="note-detail"]');
-                if (!noteDetail) return;
-                const btns = noteDetail.querySelectorAll('button, [class*="expand"], [class*="more"]');
+                const btns = document.querySelectorAll('button, [class*="expand"], [class*="more"]');
                 for (const btn of btns) {
                     const text = (btn.innerText || '').trim();
-                    if (text === '展开' || text.includes('展开')) {
-                        btn.click();
-                        return;
+                    if (text === '展开') {  // 精确匹配，避开评论的"展开N条回复"
+                        const rect = btn.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) { btn.click(); return; }
                     }
                 }
             }
@@ -669,6 +648,43 @@ class DouyinScraper(BaseScraper):
                     if (rect.width <= 0 || rect.height <= 0) continue;
                     const text = normalize(el.innerText || '');
                     if (text.length >= 5) return text;
+                }
+
+                // 兜底：图文帖无固定类名——用"发布时间"文字做锚点，
+                // 取它上方兄弟节点里的实质正文（跳过 stats/控制条/按钮文字）。
+                // 类名无关，只靠"发布时间"这个稳定文字 + 文本语义。
+                const SKIP_WORDS = ['举报','分享','收藏','点赞','转发','关注','不感兴趣',
+                                    '查看更多','倍速','清屏','连播','循环播放','智能','静音','弹幕'];
+                const isSkip = (t) => {
+                    if (!t) return true;
+                    if (SKIP_WORDS.some(w => t.includes(w))) return true;
+                    const d = (t.match(/\\d/g) || []).length;
+                    if (t.length > 0 && d / t.length > 0.5) return true;          // 多半是数字（点赞数等）
+                    if (/^\\d{1,2}:\\d{2}\\s*\\/\\s*\\d{1,2}:\\d{2}/.test(t)) return true;  // 进度 00:15/00:16
+                    return false;
+                };
+                const allLeaves = Array.from(document.querySelectorAll('span, p, div, time'));
+                let timeLeaf = null;
+                for (const el of allLeaves) {
+                    if (el.childElementCount > 0) continue;
+                    const t = (el.textContent || '').trim();
+                    if (t.startsWith('发布时间') && t.length < 50) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) { timeLeaf = el; break; }
+                    }
+                }
+                if (timeLeaf) {
+                    let node = timeLeaf, levels = 0;
+                    while (node && levels < 5) {
+                        const prev = node.previousElementSibling;
+                        if (prev) {
+                            const c = normalize(prev.innerText || prev.textContent || '')
+                                .replace(/展开|收起/g, '').trim();
+                            if (c.length >= 3 && !isSkip(c)) return c;
+                        }
+                        node = node.parentElement;
+                        levels++;
+                    }
                 }
 
                 return '';
