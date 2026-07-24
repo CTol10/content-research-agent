@@ -583,24 +583,66 @@ class DouyinScraper(BaseScraper):
                     .replace(/ *\\n+ */g, '\\n')
                     .trim();
 
+                // 优先：Open Graph meta 标签（最稳定，不依赖 DOM 结构）
+                const ogDesc = document.querySelector('meta[property="og:description"]');
+                if (ogDesc) {
+                    const text = normalize(ogDesc.getAttribute('content') || '');
+                    if (text.length >= 3) return text;
+                }
+                const metaDesc = document.querySelector('meta[name="description"]');
+                if (metaDesc) {
+                    const text = normalize(metaDesc.getAttribute('content') || '');
+                    if (text.length >= 3) return text;
+                }
+
                 // Primary: note-detail (new Douyin layout)
                 const noteDetail = document.querySelector('[data-e2e="note-detail"]');
                 if (noteDetail) {
-                    // Find the description div inside note-detail
-                    // Look for the div that contains the main text (not user info)
+                    // 通用提取：不依赖混淆类名。
+                    // 策略：以"发布时间"为锚点，往前找紧邻的正文段落。
+                    // 正文通常是发布时间前面那个 10-500 字、不含元数据的纯文本段落。
+                    const fullText = normalize(noteDetail.textContent || '');
+                    // 移除"发布时间：..."及之后的内容
+                    const beforeTime = fullText.replace(/\\n?发布时间：.*$/s, '').trim();
+                    // 按行切分
+                    const lines = beforeTime.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
+                    // 从后往前找：紧邻"发布时间"之前的长文本行（正文段落）
+                    let postText = '';
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                        const line = lines[i];
+                        // 跳过明显的元数据/控件/评论/统计数字
+                        if (/(粉丝|关注|获赞|播放|进入全屏|截图|字幕|不开启|重播|点击按住|收藏|分享|转发|举报|大家都在搜|全部评论|暂时没有更多评论|条回复|友善评论|登录后)/.test(line)) continue;
+                        if (/^(登录|注册|打开)$/.test(line)) continue;
+                        if (/^\\d+$/.test(line)) continue;                                              // 纯数字（点赞数等）
+                        if (/^\\d+\\s*(收藏|分享|赞|评论)$/.test(line)) continue;                       // "42收藏"
+                        if (/^\\d{1,2}:\\d{2}(\\s*\\/\\s*\\d{1,2}:\\d{2})?$/.test(line)) continue;     // 视频时长 "24:14" 或 "24:14/0:30"
+                        if (/^\\d+\\/\\d+$/.test(line)) continue;                                       // 分页 "1/4" "241471/4"
+                        if (/^(\\d+\\s*)+\\/\\d+$/.test(line)) continue;                                // "24 14 7 1/4" 等变异
+                        if (/^\\d+周前|^\\d+天前|^\\d+小时前|^\\d+分钟前|^刚刚/.test(line)) continue;
+                        if (/^[·•]\\s*\\S+$/.test(line)) continue;
+                        if (['展开', '收起'].includes(line)) continue;
+                        // 正文：10-500 字的自然语言段落
+                        if (line.length >= 10 && line.length <= 500) {
+                            postText = line;
+                            break;
+                        }
+                        // 短文本也可能是正文（如"无标题"），但如果 < 10 就继续向前找
+                        if (line.length >= 3 && !postText) {
+                            postText = line;
+                        }
+                    }
+                    if (postText) return postText;
+
+                    // 如果逐行解析为空，再尝试旧的混淆类名作为补充
                     const descDiv = noteDetail.querySelector('.D7OuYODi, .SAYsgcoF, [class*="desc"]');
                     if (descDiv) {
-                        let text = normalize(descDiv.innerText || '');
-                        // Remove expand/collapse button text
-                        text = text.replace(/\\n?展开\\n?/g, '\\n').replace(/\\n?收起\\n?/g, '\\n');
-                        // Remove trailing publish time
-                        text = text.replace(/\\n发布时间：.*$/, '').trim();
-                        // Collapse multiple newlines into single space for consistent format
-                        text = text.replace(/\\n+/g, ' ').trim();
-                        if (text.length >= 2) return text;
+                        let t2 = normalize(descDiv.innerText || '');
+                        t2 = t2.replace(/\\n?展开\\n?/g, '\\n').replace(/\\n?收起\\n?/g, '\\n');
+                        t2 = t2.replace(/\\n发布时间：.*$/, '').trim();
+                        t2 = t2.replace(/\\n+/g, ' ').trim();
+                        if (t2.length >= 2) return t2;
                     }
 
-                    // Fallback: get text from the content area, skip user info
                     const contentDiv = noteDetail.querySelector('.oEmB895Z');
                     if (contentDiv) {
                         const allText = contentDiv.innerText || '';
@@ -654,10 +696,12 @@ class DouyinScraper(BaseScraper):
                 // 取它上方兄弟节点里的实质正文（跳过 stats/控制条/按钮文字）。
                 // 类名无关，只靠"发布时间"这个稳定文字 + 文本语义。
                 const SKIP_WORDS = ['举报','分享','收藏','点赞','转发','关注','不感兴趣',
-                                    '查看更多','倍速','清屏','连播','循环播放','智能','静音','弹幕'];
+                                    '查看更多','倍速','清屏','连播','循环播放','智能','静音','弹幕',
+                                    '登录后即可','参与互动','条评论','说点什么','友善评论'];
                 const isSkip = (t) => {
                     if (!t) return true;
                     if (SKIP_WORDS.some(w => t.includes(w))) return true;
+                    if (/^(登录|注册|打开)(后)?(即可)?(参与|查看|发表)/.test(t)) return true;  // 登录类占位文本
                     const d = (t.match(/\\d/g) || []).length;
                     if (t.length > 0 && d / t.length > 0.5) return true;          // 多半是数字（点赞数等）
                     if (/^\\d{1,2}:\\d{2}\\s*\\/\\s*\\d{1,2}:\\d{2}/.test(t)) return true;  // 进度 00:15/00:16
@@ -692,6 +736,15 @@ class DouyinScraper(BaseScraper):
         """)
         if not content:
             logger.info("[douyin] No post content found, using [无正文]")
+            return "[无正文]"
+        # 过滤掉登录占位文本等非正文内容
+        _bogus_patterns = [
+            "登录后即可", "登录后参与", "参与互动讨论", "说点什么",
+            "友善评论", "条评论", "还没有评论", "暂无评论",
+            "评论",  # 单独的"评论"可能是按钮文字，但太短已在上层过滤
+        ]
+        if any(p in content for p in _bogus_patterns) and len(content) < 20:
+            logger.info(f"[douyin] Post content looks like placeholder: {content[:50]}...")
             return "[无正文]"
         return content
 

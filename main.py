@@ -522,7 +522,7 @@ def classify_error(error_str: str) -> str:
 
 
 async def run_all(input_file, platforms_filter=None, resume=False, batch_size=0,
-                  login_timeout=300, classify=True, process_video=True):
+                  login_timeout=300, classify=True, process_video=True, headless=False):
     """Full pipeline: check cookies → auto-login if needed → scrape."""
     import config
     from scrapers.douyin import DouyinScraper
@@ -581,11 +581,11 @@ async def run_all(input_file, platforms_filter=None, resume=False, batch_size=0,
     print(f"\n开始抓取...\n")
     return await scrape_all(input_file, platforms_filter, resume=resume,
                             batch_size=batch_size, classify=classify,
-                            process_video=process_video)
+                            process_video=process_video, headless=headless)
 
 
 async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size=0,
-                     classify=True, process_video=True):
+                     classify=True, process_video=True, headless=False):
     import json as _json
     import config
     from scrapers.douyin import DouyinScraper
@@ -693,47 +693,57 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
     # ── WeChat window check ──────────────────────────────────────
     wechat_needed = [p for p in needed_platforms if p in ("wechat", "wechat_channels")]
     if wechat_needed:
-        from scrapers.wechat import detect_version
-        version = detect_version()
-        if version == "4.1.7":
-            from scrapers.wechat.v417.window_manager import WechatWindowManagerV417
-            wm = WechatWindowManagerV417()
-            window_found = wm.find_main()
-        else:
-            from scrapers.wechat_window_manager import WechatWindowManager
-            wm = WechatWindowManager()
-            window_found = wm.find_window()
-        if not window_found:
+        if headless:
             print("\n" + "=" * 60)
-            print("  [提示] 检测到需要抓取微信平台，但微信窗口未打开。")
-            print("  请打开微信 PC 客户端并登录，然后按 Enter 继续...")
-            print("  （如果不需要抓取微信，可以按 Ctrl+C 退出，")
-            print("   下次运行时使用 --platforms 参数排除微信平台）")
+            print("  [提示] 无头模式下不支持微信平台（需要 PC 客户端窗口）。")
+            print(f"  将跳过微信相关链接: {', '.join(wechat_needed)}")
             print("=" * 60)
-            try:
-                input()
-            except (EOFError, KeyboardInterrupt):
-                print("\n用户取消。")
+            rows = [r for r in rows if r["platform_key"] not in ("wechat", "wechat_channels")]
+            if not rows:
+                print("没有可抓取的非微信链接，退出。")
                 return
-
-        # ── 元宝登录态检查（视频号口播在线解析所需）──
-        # 直接跑抓取（--run）时若缺 _yuanbao_profile，提示扫码登录，不必单独 --login。
-        if "wechat_channels" in needed_platforms:
-            from scrapers.wechat.channels_sph_parser import ChannelsSphParser
-            yuanbao_profile = config.COOKIE_DIR / "_yuanbao_profile"
-            if not yuanbao_profile.exists():
-                print("\n" + "=" * 56)
-                print("  视频号口播在线解析需要腾讯元宝登录态")
-                print("  未检测到 cookies/_yuanbao_profile，现在扫码登录？[Y/n]")
-                print("=" * 56)
+        else:
+            from scrapers.wechat import detect_version
+            version = detect_version()
+            if version == "4.1.7":
+                from scrapers.wechat.v417.window_manager import WechatWindowManagerV417
+                wm = WechatWindowManagerV417()
+                window_found = wm.find_main()
+            else:
+                from scrapers.wechat_window_manager import WechatWindowManager
+                wm = WechatWindowManager()
+                window_found = wm.find_window()
+            if not window_found:
+                print("\n" + "=" * 60)
+                print("  [提示] 检测到需要抓取微信平台，但微信窗口未打开。")
+                print("  请打开微信 PC 客户端并登录，然后按 Enter 继续...")
+                print("  （如果不需要抓取微信，可以按 Ctrl+C 退出，")
+                print("   下次运行时使用 --platforms 参数排除微信平台）")
+                print("=" * 60)
                 try:
-                    _yb_ans = input().strip().lower()
+                    input()
                 except (EOFError, KeyboardInterrupt):
-                    _yb_ans = ""
-                if _yb_ans in ("", "y", "yes"):
-                    await ChannelsSphParser.login_interactive(wait_seconds=300)
-                else:
-                    print("  跳过——视频号口播将为空（之后可用 --login 单独登录元宝）。")
+                    print("\n用户取消。")
+                    return
+
+            # ── 元宝登录态检查（视频号口播在线解析所需）──
+            # 直接跑抓取（--run）时若缺 _yuanbao_profile，提示扫码登录，不必单独 --login。
+            if "wechat_channels" in needed_platforms:
+                from scrapers.wechat.channels_sph_parser import ChannelsSphParser
+                yuanbao_profile = config.COOKIE_DIR / "_yuanbao_profile"
+                if not yuanbao_profile.exists():
+                    print("\n" + "=" * 56)
+                    print("  视频号口播在线解析需要腾讯元宝登录态")
+                    print("  未检测到 cookies/_yuanbao_profile，现在扫码登录？[Y/n]")
+                    print("=" * 56)
+                    try:
+                        _yb_ans = input().strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        _yb_ans = ""
+                    if _yb_ans in ("", "y", "yes"):
+                        await ChannelsSphParser.login_interactive(wait_seconds=300)
+                    else:
+                        print("  跳过——视频号口播将为空（之后可用 --login 单独登录元宝）。")
 
     results = []
     success_count = 0
@@ -775,7 +785,9 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
 
         scraper = scraper_cls()
         try:
-            await scraper.start()
+            is_wechat_p = platform_key in ("wechat", "wechat_channels")
+            start_kwargs = {} if is_wechat_p else {"headless": headless}
+            await scraper.start(**start_kwargs)
         except Exception as e:
             is_wechat = platform_key in ("wechat", "wechat_channels")
             if is_wechat:
@@ -970,7 +982,9 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
                         logger.info(f"[{platform_key}] Restarting browser context...")
                         try:
                             await scraper.stop()
-                            await scraper.start()
+                            _is_wx = platform_key in ("wechat", "wechat_channels")
+                            _skw = {} if _is_wx else {"headless": headless}
+                            await scraper.start(**_skw)
                         except Exception as re:
                             logger.error(f"[{platform_key}] Failed to restart: {re}")
 
@@ -1072,6 +1086,8 @@ def main():
                         help="微信操作模式: pc(桌面相对坐标,默认) browser(浏览器) auto(自动选择)")
     parser.add_argument("--wechat-calibrate", action="store_true",
                         help="校准微信PC桌面坐标（交互式点击记录UI元素位置）")
+    parser.add_argument("--headless", action="store_true",
+                        help="无头模式运行浏览器（非微信平台适用）")
     args = parser.parse_args()
 
     if not args.setup:
@@ -1140,7 +1156,8 @@ def main():
             platforms_filter = [p.strip() for p in args.platforms.split(",") if p.strip()]
         asyncio.run(run_all(input_file, platforms_filter, resume=args.resume,
                             batch_size=args.batch_size, login_timeout=args.login_timeout,
-                            classify=not args.no_classify, process_video=not args.no_video))
+                            classify=not args.no_classify, process_video=not args.no_video,
+                            headless=args.headless))
     elif args.login_open:
         if args.platforms:
             platform_list = [p.strip() for p in args.platforms.split(",") if p.strip()]
@@ -1178,7 +1195,7 @@ def main():
             platforms_filter = [p.strip() for p in args.platforms.split(",") if p.strip()]
         asyncio.run(scrape_all(input_file, platforms_filter, resume=args.resume,
                                batch_size=args.batch_size, classify=not args.no_classify,
-                               process_video=not args.no_video))
+                               process_video=not args.no_video, headless=args.headless))
 
 
 if __name__ == "__main__":

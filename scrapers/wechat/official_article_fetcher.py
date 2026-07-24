@@ -31,8 +31,12 @@ _HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
 
-# js_content 缺失或正文过短 => 命中验证页/异常页
-_MIN_BODY_LEN = 50
+# 模块级 Session：cookie 跨文章持久化，提高拿到全文页（而非验证页）的概率
+_SESSION = requests.Session()
+_SESSION.headers.update(_HEADERS)
+
+# js_content 缺失或正文过短 => 命中验证页/异常页（meta_description 兜底要求 >=20）
+_MIN_BODY_LEN = 20
 
 
 def is_official_article_url(url: str) -> bool:
@@ -67,26 +71,51 @@ def _og_meta(html: str, prop: str) -> str:
 
 
 def _extract_body(html: str) -> str:
-    """抽 <div id="js_content"> 的纯文本。"""
+    """抽正文：优先 <div id="js_content">；反爬变体页改从 <meta name="description">
+    取（正文被塞进 meta、用 JS \\xNN 转义：\\x0a→换行 \\x26→&）。命中任一即返回纯文本。
+    """
+    # 1) js_content div（正常页）
     m = re.search(
         r'<div[^>]*id="js_content"[^>]*>(.*?)</div>\s*<!--', html, re.S
     ) or re.search(r'<div[^>]*id="js_content"[^>]*>(.*?)</div>', html, re.S)
-    if not m:
-        return ""
-    raw = m.group(1)
-    # <p>/<br>/<div> 边界转成换行，其余 tag 剥掉
-    text = re.sub(r"<(?:p|br|/p|div|/div)[^>]*>", "\n", raw, flags=re.I)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = (
-        text.replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", '"')
-        .replace("&#39;", "'")
-    )
-    text = re.sub(r"\n{2,}", "\n", text).strip()
-    return text
+    if m:
+        raw = m.group(1)
+        # <p>/<br>/<div> 边界转成换行，其余 tag 剥掉
+        text = re.sub(r"<(?:p|br|/p|div|/div)[^>]*>", "\n", raw, flags=re.I)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = (
+            text.replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", '"')
+            .replace("&#39;", "'")
+        )
+        text = re.sub(r"\n{2,}", "\n", text).strip()
+        if len(text) >= _MIN_BODY_LEN:
+            return text
+
+    # 2) <meta name="description">（反爬变体页正文塞这里）
+    mm = re.search(r'<meta\s+name="description"\s+content="([^"]*)"', html, re.S) or \
+        re.search(r'<meta\s+content="([^"]*)"\s+name="description"', html, re.S)
+    if mm:
+        raw = mm.group(1)
+        # 解码 JS \xNN 转义（\x0a→换行 \x26→& \x27→' \x22→"）
+        decoded = re.sub(r"\\x([0-9a-fA-F]{2})", lambda x: chr(int(x.group(1), 16)), raw)
+        decoded = (
+            decoded.replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", '"')
+            .replace("&#39;", "'")
+        )
+        text = re.sub(r"<[^>]+>", "", decoded)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{2,}", "\n", text).strip()
+        if len(text) >= _MIN_BODY_LEN:
+            return text
+    return ""
 
 
 def fetch_article_body(url: str, timeout: int = 20) -> dict | None:
@@ -99,7 +128,7 @@ def fetch_article_body(url: str, timeout: int = 20) -> dict | None:
         logger.warning(f"[official_fetch] 非公众号链接: {url[:60]}")
         return None
     try:
-        r = requests.get(url, headers=_HEADERS, timeout=timeout)
+        r = _SESSION.get(url, timeout=timeout)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[official_fetch] 请求失败 {url[:60]}: {e}")
         return None

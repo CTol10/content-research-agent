@@ -59,6 +59,20 @@ def _cleanup(path: str) -> None:
         pass
 
 
+def _resolve_chrome_channel() -> str | None:
+    """检测系统 Chrome/Edge，让元宝登录用真实浏览器而非 Playwright 自带 Chromium。
+
+    exe 未 bundle Chromium（dist/playwright_browsers 为空），不传 channel 会
+    找不到浏览器可执行文件而启动失败。抖音等 scraper 用 channel="chrome" 走
+    系统 Chrome，这里复用同一套检测。
+    """
+    try:
+        from scrapers.base import _get_browser_channel, _detect_browser_channel_fallback
+        return _get_browser_channel() or _detect_browser_channel_fallback()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 _cookie_cache: str | None = None
 
 
@@ -83,10 +97,11 @@ async def _load_cookie_from_profile() -> str:
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                str(profile_dir), headless=True,
-                args=["--no-first-run", "--disable-blink-features=AutomationControlled"],
-            )
+            _ch = _resolve_chrome_channel()
+            _kw = {"headless": True, "args": ["--no-first-run", "--disable-blink-features=AutomationControlled"]}
+            if _ch:
+                _kw["channel"] = _ch
+            ctx = await pw.chromium.launch_persistent_context(str(profile_dir), **_kw)
             try:
                 cookies = await ctx.cookies("https://yuanbao.tencent.com/")
             finally:
@@ -371,17 +386,20 @@ class ChannelsSphParser:
         profile_dir.mkdir(parents=True, exist_ok=True)
 
         async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                str(profile_dir),
-                headless=False,
-                viewport={"width": 1280, "height": 900},
-                user_agent=config.DEFAULT_USER_AGENT,
-                args=[
+            _ch = _resolve_chrome_channel()
+            _kw = {
+                "headless": False,
+                "viewport": {"width": 1280, "height": 900},
+                "user_agent": config.DEFAULT_USER_AGENT,
+                "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--disable-infobars",
                     "--no-first-run",
                 ],
-            )
+            }
+            if _ch:
+                _kw["channel"] = _ch
+            ctx = await pw.chromium.launch_persistent_context(str(profile_dir), **_kw)
             page = await ctx.new_page()
             try:
                 await page.goto("https://yuanbao.tencent.com/", timeout=30000)

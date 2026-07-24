@@ -594,6 +594,49 @@ def build_user_prompt(post_content: str) -> str:
     return f"请分析以下帖子内容：\n\n{post_content}"
 
 
+def _extract_json_object(text: str) -> str:
+    """从模型响应里抠第一个完整 JSON 对象，容忍 markdown 围栏和尾部多余文本。
+
+    MiMo 即便设了 response_format=json_object，偶尔仍返回 ```json 围栏
+    或在 JSON 后追加说明文字，导致 json.loads 报 "Extra data"。
+    """
+    text = (text or "").strip()
+    # 剥掉 markdown 代码围栏（```json ... ``` 或 ``` ... ```）
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    # 抠第一个平衡的 {...}，忽略其后多余文本（处理 "Extra data"）
+    start = text.find("{")
+    if start == -1:
+        return text  # 没有 {，交给 json.loads 报错
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+    return text  # 没找到闭合，原样交给 json.loads
+
+
 def parse_response(response_text: str) -> dict:
     """Parse the API response JSON into structured result.
 
@@ -604,15 +647,7 @@ def parse_response(response_text: str) -> dict:
     default_result = {"tags": [], "has_comparison": "否"}
 
     try:
-        # Try to extract JSON from the response
-        text = response_text.strip()
-        # Handle markdown code blocks
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-
+        text = _extract_json_object(response_text)
         result = json.loads(text)
 
         # Validate structure
@@ -636,6 +671,7 @@ def parse_response(response_text: str) -> dict:
 
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.error(f"[classifier] Failed to parse response: {e}")
+        logger.warning(f"[classifier] raw response (first 300): {response_text[:300]!r}")
         return default_result
 
 
