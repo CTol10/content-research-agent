@@ -1,12 +1,16 @@
-# scrapers/wechat_calibrator.py
-"""Interactive coordinate calibration for WeChat PC desktop scrapers.
+# scrapers/wechat/v411/calibrator.py
+"""Interactive coordinate calibration for WeChat PC desktop scrapers (v4.1.11 single-window).
 
 Usage:
     python main.py --wechat-calibrate
 
 Walks the user through recording relative positions of UI elements
-in the WeChat window. Press F8 to record mouse position, F9 to skip.
-Records are saved to config.wechat_pc.json.
+in the WeChat window.  Press F8 to record mouse position, F5 to accept
+recommended position, F9 to skip.
+
+Features:
+  Layer 1 — Smart defaults + coordinate range validation
+  Layer 2 — Transparent overlay with crosshair / rectangle preview
 """
 import ctypes
 import json
@@ -19,6 +23,13 @@ import pyautogui
 
 import config
 from scrapers.wechat.v411.window_manager import WechatWindowManager, WindowRect
+from scrapers.wechat.calibration import (
+    CalibrationStep,
+    STEPS_V411,
+    validate_point,
+    validate_region,
+    CalibrationOverlay,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +37,16 @@ _CALIBRATION_CONFIG = config.BASE_DIR / "config.wechat_pc.json"
 _CALIBRATED_PROFILE = "wechat_pc_calibrated"
 
 # Virtual key codes
-VK_F8 = 0x77
-VK_F9 = 0x78
+VK_F5 = 0x74      # Accept recommendation
+VK_F8 = 0x77      # Record position
+VK_F9 = 0x78      # Skip
 VK_ESCAPE = 0x1B
 
 
 def _wait_for_key(*vk_codes, prompt: str = "按 F8 记录位置，F9 跳过") -> int:
     """Wait for user to press one of the specified keys. Returns the VK code.
 
-    Uses GetAsyncKeyState polling. User can freely move the mouse
+    Uses GetAsyncKeyState polling.  User can freely move the mouse
     before pressing the key.
     """
     print(f"\n  {prompt}")
@@ -57,108 +69,50 @@ def _wait_for_key(*vk_codes, prompt: str = "按 F8 记录位置，F9 跳过") ->
         time.sleep(0.05)
 
 
-# ── Calibration step definitions ─────────────────────────────────
+def _step_to_screen_point(
+    step: CalibrationStep, rect: WindowRect,
+) -> tuple[int, int] | None:
+    """Convert a step's default ratios to screen coordinates.
 
-CALIBRATION_STEPS = [
-    {
-        "section": "wechat_main",
-        "key": "search_bar",
-        "type": "point",
-        "title": "搜索栏",
-        "instructions": (
-            "请将鼠标移动到 微信主界面顶部的【搜索栏/搜索框】位置"
-        ),
-    },
-    {
-        "section": "wechat_main",
-        "key": "result_open_entry",
-        "type": "point",
-        "title": "搜索结果入口（访问网页）",
-        "instructions": (
-            "请在微信搜索栏中搜索一个任意公众号链接 (如 mp.weixin.qq.com/s/xxx)，\n"
-            "然后将鼠标移动到搜索结果中【访问网页】按钮的位置"
-        ),
-    },
-    {
-        "section": "official",
-        "key": "comment_icon",
-        "type": "point",
-        "title": "公众号 - 评论区图标",
-        "instructions": (
-            "在公众号文章页面，\n"
-            "将鼠标移动到 文章底部的【评论区图标/按钮】（点击可展开评论区）"
-        ),
-    },
-    {
-        "section": "official",
-        "key": "comment_region",
-        "type": "region",
-        "title": "公众号 - 评论区 + 文章正文区",
-        "instructions": (
-            "请在打开的公众号文章中，\n"
-            "第一次按 F8: 记录区域的【左上角】（文章正文上沿到评论区底部）\n"
-            "第二次按 F8: 记录区域的【右下角】"
-        ),
-    },
-    {
-        "section": "channels",
-        "key": "pause_video",
-        "type": "point",
-        "title": "视频号 - 视频区域中心",
-        "instructions": (
-            "请先在微信中打开一个 视频号视频（搜索 channels.weixin.qq.com 链接后点击访问网页），\n"
-            "然后将鼠标移动到 视频播放区域的中心位置（用于暂停视频）"
-        ),
-    },
-    {
-        "section": "channels",
-        "key": "comment_button",
-        "type": "point",
-        "title": "视频号 - 评论按钮",
-        "instructions": (
-            "在视频号视频页面，\n"
-            "将鼠标移动到 右侧或底部的【评论按钮】"
-        ),
-    },
-    {
-        "section": "channels",
-        "key": "comment_panel_region",
-        "type": "region",
-        "title": "视频号 - 评论面板区域",
-        "instructions": (
-            "在视频号页面打开评论面板（点击评论按钮），\n"
-            "第一次按 F8: 记录评论面板【左上角】\n"
-            "第二次按 F8: 记录评论面板【右下角】"
-        ),
-    },
-    {
-        "section": "channels",
-        "key": "video_area",
-        "type": "region",
-        "title": "视频号 - 视频播放区域",
-        "instructions": (
-            "在视频号页面（评论面板关闭状态），\n"
-            "第一次按 F8: 记录视频播放区域【左上角】\n"
-            "第二次按 F8: 记录视频播放区域【右下角】\n"
-            "（用于录屏提取口播，请尽量框住完整的视频画面）"
-        ),
-    },
-]
+    Returns (screen_x, screen_y) or None if the step has no defaults.
+    """
+    if step.default_x_ratio is None or step.default_y_ratio is None:
+        return None
+    x = rect.left + round(rect.width * step.default_x_ratio)
+    y = rect.top + round(rect.height * step.default_y_ratio)
+    return (x, y)
+
+
+def _step_to_screen_region(
+    step: CalibrationStep, rect: WindowRect,
+) -> tuple[int, int, int, int] | None:
+    """Convert a step's default region ratios to screen coordinates.
+
+    Returns (left, top, width, height) or None if the step has no defaults.
+    """
+    if step.default_left_ratio is None or step.default_top_ratio is None:
+        return None
+    left = rect.left + round(rect.width * step.default_left_ratio)
+    top = rect.top + round(rect.height * step.default_top_ratio)
+    w = round(rect.width * (step.default_width_ratio or 0.4))
+    h = round(rect.height * (step.default_height_ratio or 0.7))
+    return (left, top, w, h)
 
 
 class WechatCalibrator:
-    """Interactive calibration tool for WeChat PC coordinates.
+    """Interactive calibration tool for WeChat PC coordinates (v4.1.11).
 
     Records mouse positions relative to the WeChat window and saves
     them as a coordinate profile in config.wechat_pc.json.
 
     Controls:
+      F5 — accept recommended position (when available)
       F8 — record current mouse position
       F9 — skip current step
       Esc — quit calibration
     """
 
-    def __init__(self):
+    def __init__(self, use_overlay: bool = True):
         self._window_mgr = WechatWindowManager()
         self._rect: WindowRect | None = None
         self._data: dict = {
@@ -167,6 +121,8 @@ class WechatCalibrator:
             "channels": {},
         }
         self._skipped: list[str] = []
+        self._use_overlay = use_overlay
+        self._overlay: CalibrationOverlay | None = None
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -181,21 +137,39 @@ class WechatCalibrator:
         print("操作方式：")
         print("  1. 阅读提示，将鼠标移动到目标位置")
         print("  2. 按 F8 记录当前鼠标位置")
-        print("  3. 按 F9 跳过当前步骤")
-        print("  4. 按 Esc 退出校准")
+        print("  3. 按 F5 使用推荐位置（黄色圆点指示）")
+        print("  4. 按 F9 跳过当前步骤")
+        print("  5. 按 Esc 退出校准")
         print()
 
+        # Start overlay (if enabled)
+        if self._use_overlay:
+            self._overlay = CalibrationOverlay()
+            if not self._overlay.start():
+                print("  [提示] Overlay 创建失败，将使用纯文字模式。")
+                self._overlay = None
+            else:
+                print("  [提示] 屏幕叠加层已启用（绿色十字线 + 黄色推荐点）")
+
+        try:
+            return self._run_steps()
+        finally:
+            if self._overlay:
+                self._overlay.stop()
+
+    def _run_steps(self) -> bool:
+        """Internal: run all calibration steps."""
         # Step 0: Find WeChat window
         if not self._ensure_window():
             return False
 
-        total = len(CALIBRATION_STEPS)
+        total = len(STEPS_V411)
         success_count = 0
 
-        for i, step in enumerate(CALIBRATION_STEPS, 1):
-            section = step["section"]
-            key = step["key"]
-            step_type = step["type"]
+        for i, step in enumerate(STEPS_V411, 1):
+            section = step.section
+            key = step.key
+            step_type = step.type
 
             # Refresh window rect BEFORE each step — the window may have
             # resized (e.g. article view widens from 942→1386 px)
@@ -209,103 +183,201 @@ class WechatCalibrator:
             # Print step header
             print()
             print("=" * 60)
-            print(f"  [{i}/{total}] {step['title']}  ({'点击位置' if step_type == 'point' else '矩形区域'})")
+            print(f"  [{i}/{total}] {step.title}  ({'点击位置' if step_type == 'point' else '矩形区域'})")
             print("=" * 60)
-            print(f"  {step['instructions']}")
+            print(f"  {step.instructions}")
 
             if step_type == "point":
-                vk = _wait_for_key(
-                    VK_F8, VK_F9, VK_ESCAPE,
-                    prompt="移动鼠标 → 按 F8 记录 | F9 跳过 | Esc 退出",
-                )
-
-                if vk == VK_ESCAPE:
-                    print("  [退出] 用户取消\n")
-                    break
-                if vk == VK_F9:
-                    print(f"  [跳过] {step['title']}")
-                    self._skipped.append(f"{section}.{key}")
-                    continue
-
-                try:
-                    abs_x, abs_y = pyautogui.position()
-                    x_ratio = (abs_x - self._rect.left) / self._rect.width
-                    y_ratio = (abs_y - self._rect.top) / self._rect.height
-                    self._data[section][key] = {
-                        "x_ratio": round(x_ratio, 4),
-                        "y_ratio": round(y_ratio, 4),
-                    }
-                    print(
-                        f"  [OK] 屏幕({abs_x}, {abs_y}) → "
-                        f"相对({x_ratio:.4f}, {y_ratio:.4f})"
-                    )
-                    success_count += 1
-                except Exception as e:
-                    print(f"  [错误] {e}")
-                    self._skipped.append(f"{section}.{key}")
-
+                result = self._record_point(i, total, step)
             else:
-                # Region: two F8 presses
-                vk1 = _wait_for_key(
-                    VK_F8, VK_F9, VK_ESCAPE,
-                    prompt="移动鼠标到【左上角】→ 按 F8 记录 | F9 跳过",
-                )
+                result = self._record_region(i, total, step)
 
-                if vk1 == VK_ESCAPE:
-                    print("  [退出] 用户取消\n")
-                    break
-                if vk1 == VK_F9:
-                    print(f"  [跳过] {step['title']}")
-                    self._skipped.append(f"{section}.{key}")
-                    continue
-
-                try:
-                    left_x, top_y = pyautogui.position()
-                    print(f"  左上角: 屏幕({left_x}, {top_y})")
-
-                    vk2 = _wait_for_key(
-                        VK_F8, VK_ESCAPE,
-                        prompt="移动鼠标到【右下角】→ 按 F8 记录 | Esc 退出",
-                    )
-
-                    if vk2 == VK_ESCAPE:
-                        print("  [退出] 用户取消\n")
-                        break
-
-                    right_x, bottom_y = pyautogui.position()
-                    print(f"  右下角: 屏幕({right_x}, {bottom_y})")
-
-                    left_ratio = (left_x - self._rect.left) / self._rect.width
-                    top_ratio = (top_y - self._rect.top) / self._rect.height
-                    width_ratio = (right_x - left_x) / self._rect.width
-                    height_ratio = (bottom_y - top_y) / self._rect.height
-
-                    self._data[section][key] = {
-                        "left_ratio": round(left_ratio, 4),
-                        "top_ratio": round(top_ratio, 4),
-                        "width_ratio": round(width_ratio, 4),
-                        "height_ratio": round(height_ratio, 4),
-                    }
-                    print(
-                        f"  [OK] 区域: left={left_ratio:.4f} top={top_ratio:.4f} "
-                        f"w={width_ratio:.4f} h={height_ratio:.4f}"
-                    )
-                    success_count += 1
-                except Exception as e:
-                    print(f"  [错误] {e}")
-                    self._skipped.append(f"{section}.{key}")
+            if result == "quit":
+                break
+            elif result == "skip":
+                self._skipped.append(f"{section}.{key}")
+                continue
+            elif result == "ok":
+                success_count += 1
 
             # Refresh window rect in case it moved
             if self._window_mgr.is_found:
                 self._rect = self._window_mgr.get_rect()
 
-        # Save
+        # Hide overlay before save
+        if self._overlay:
+            self._overlay.hide()
+
         if success_count == 0:
             print("\n没有记录任何坐标，取消保存。")
             return False
 
         self._save()
         return True
+
+    def _record_point(self, i: int, total: int, step: CalibrationStep) -> str:
+        """Record a point calibration step. Returns 'ok', 'skip', or 'quit'."""
+        rect = self._rect
+
+        # Compute recommendation screen coords
+        rec = _step_to_screen_point(step, rect)
+        rec_x, rec_y = rec if rec else (None, None)
+
+        # Track mouse for overlay
+        mx, my = pyautogui.position()
+
+        # Label for overlay
+        label = f"[{i}/{total}] {step.title} | F8 记录 · "
+        if rec:
+            label += "F5 接受推荐 · "
+        label += "F9 跳过"
+
+        # Show overlay in point mode
+        if self._overlay:
+            self._overlay.show_point_mode(mx, my, rec_x, rec_y, label)
+
+        # Wait for key — include F5 if recommendation is available
+        if rec:
+            vk_keys = (VK_F5, VK_F8, VK_F9, VK_ESCAPE)
+            prompt = "移动鼠标 → F8 记录 | F5 使用推荐位置 | F9 跳过 | Esc 退出"
+        else:
+            vk_keys = (VK_F8, VK_F9, VK_ESCAPE)
+            prompt = "移动鼠标 → F8 记录 | F9 跳过 | Esc 退出"
+
+        vk = _wait_for_key(*vk_keys, prompt=prompt)
+
+        if vk == VK_ESCAPE:
+            print("  [退出] 用户取消\n")
+            return "quit"
+        if vk == VK_F9:
+            print(f"  [跳过] {step.title}")
+            return "skip"
+
+        try:
+            if vk == VK_F5 and rec:
+                # Use recommended position
+                abs_x, abs_y = rec
+                print(f"  [推荐] 使用推荐坐标: 屏幕({abs_x}, {abs_y})")
+            else:
+                abs_x, abs_y = pyautogui.position()
+
+            x_ratio = (abs_x - rect.left) / rect.width
+            y_ratio = (abs_y - rect.top) / rect.height
+
+            self._data[step.section][step.key] = {
+                "x_ratio": round(x_ratio, 4),
+                "y_ratio": round(y_ratio, 4),
+            }
+            print(
+                f"  [OK] 屏幕({abs_x}, {abs_y}) → "
+                f"相对({x_ratio:.4f}, {y_ratio:.4f})"
+            )
+
+            # ── Validate ──
+            result = validate_point(x_ratio, y_ratio, step)
+            if result.level != "ok":
+                print(f"\n  {result.message}")
+
+        except Exception as e:
+            print(f"  [错误] {e}")
+            return "skip"
+
+        return "ok"
+
+    def _record_region(self, i: int, total: int, step: CalibrationStep) -> str:
+        """Record a region calibration step. Returns 'ok', 'skip', or 'quit'."""
+        rect = self._rect
+
+        # Compute recommendation screen region
+        rec_reg = _step_to_screen_region(step, rect)
+
+        # ── First corner ──
+        mx, my = pyautogui.position()
+        label = f"[{i}/{total}] {step.title} | 第1点: 左上角"
+
+        if self._overlay:
+            self._overlay.show_region_first(
+                mx, my,
+                rec_reg[0] if rec_reg else None,
+                rec_reg[1] if rec_reg else None,
+                rec_reg[2] if rec_reg else None,
+                rec_reg[3] if rec_reg else None,
+                label,
+            )
+
+        vk1 = _wait_for_key(
+            VK_F8, VK_F9, VK_ESCAPE,
+            prompt="移动鼠标到【左上角】→ 按 F8 记录 | F9 跳过",
+        )
+
+        if vk1 == VK_ESCAPE:
+            print("  [退出] 用户取消\n")
+            return "quit"
+        if vk1 == VK_F9:
+            print(f"  [跳过] {step.title}")
+            return "skip"
+
+        try:
+            left_x, top_y = pyautogui.position()
+            print(f"  左上角: 屏幕({left_x}, {top_y})")
+
+            # ── Second corner ──
+            label2 = (
+                f"[{i}/{total}] {step.title} | 第2点: 右下角 "
+                f"(框选区域 {abs(left_x)}..→ , {abs(top_y)}..↓)"
+            )
+
+            if self._overlay:
+                self._overlay.show_region_second(
+                    left_x, top_y,
+                    mx, my,
+                    rec_reg[0] if rec_reg else None,
+                    rec_reg[1] if rec_reg else None,
+                    rec_reg[2] if rec_reg else None,
+                    rec_reg[3] if rec_reg else None,
+                    label2,
+                )
+
+            vk2 = _wait_for_key(
+                VK_F8, VK_ESCAPE,
+                prompt="移动鼠标到【右下角】→ 按 F8 记录 | Esc 退出",
+            )
+
+            if vk2 == VK_ESCAPE:
+                print("  [退出] 用户取消\n")
+                return "quit"
+
+            right_x, bottom_y = pyautogui.position()
+            print(f"  右下角: 屏幕({right_x}, {bottom_y})")
+
+            left_ratio = (left_x - rect.left) / rect.width
+            top_ratio = (top_y - rect.top) / rect.height
+            width_ratio = (right_x - left_x) / rect.width
+            height_ratio = (bottom_y - top_y) / rect.height
+
+            self._data[step.section][step.key] = {
+                "left_ratio": round(left_ratio, 4),
+                "top_ratio": round(top_ratio, 4),
+                "width_ratio": round(width_ratio, 4),
+                "height_ratio": round(height_ratio, 4),
+            }
+            print(
+                f"  [OK] 区域: left={left_ratio:.4f} top={top_ratio:.4f} "
+                f"w={width_ratio:.4f} h={height_ratio:.4f}"
+            )
+
+            # ── Validate ──
+            result = validate_region(
+                left_ratio, top_ratio, width_ratio, height_ratio, step,
+            )
+            if result.level != "ok":
+                print(f"\n  {result.message}")
+
+        except Exception as e:
+            print(f"  [错误] {e}")
+            return "skip"
+
+        return "ok"
 
     # ── Internal ──────────────────────────────────────────────────
 

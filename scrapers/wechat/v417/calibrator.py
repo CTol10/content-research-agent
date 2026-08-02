@@ -6,6 +6,10 @@ Usage:
 
 Walks the user through recording relative positions of UI elements
 for BOTH the main Qt window and the Chrome_WidgetWin_0 popup.
+
+Features:
+  Layer 1 — Smart defaults + coordinate range validation
+  Layer 2 — Transparent overlay with crosshair / rectangle preview
 """
 import ctypes
 import json
@@ -18,11 +22,19 @@ import pyautogui
 
 import config
 from scrapers.wechat.v417.window_manager import WechatWindowManagerV417
+from scrapers.wechat.calibration import (
+    CalibrationStep,
+    STEPS_V417,
+    validate_point,
+    validate_region,
+    CalibrationOverlay,
+)
 
 logger = logging.getLogger(__name__)
 
 _CALIBRATION_CONFIG = config.BASE_DIR / "config.wechat_pc_417.json"
 
+VK_F5 = 0x74
 VK_F8 = 0x77
 VK_F9 = 0x78
 VK_ESCAPE = 0x1B
@@ -49,115 +61,34 @@ def _wait_for_key(*vk_codes, prompt: str = "按 F8 记录位置，F9 跳过") ->
         time.sleep(0.05)
 
 
-CALIBRATION_STEPS = [
-    # ── Main window coordinates ──
-    {
-        "section": "wechat_main",
-        "key": "search_bar",
-        "type": "point",
-        "title": "搜索栏（主窗口）",
-        "instructions": (
-            "在主窗口中，将鼠标移动到顶部的【搜索栏/搜索框】位置"
-        ),
-    },
-    # ── Popup window: 搜索结果 ──
-    {
-        "section": "official",
-        "key": "result_open_entry",
-        "type": "point",
-        "title": "搜索结果 — 访问网页（弹窗）",
-        "instructions": (
-            "在微信主窗口搜索栏搜索一个任意公众号/视频号链接，\n"
-            "搜索后会出现搜索结果弹窗，\n"
-            "将鼠标移动到弹窗中【访问网页】按钮的位置"
-        ),
-    },
-    # ── Popup window: 公众号 ──
-    {
-        "section": "official",
-        "key": "comment_icon",
-        "type": "point",
-        "title": "公众号 - 评论区图标（弹窗）",
-        "instructions": (
-            "请在弹窗中打开一个公众号文章，\n"
-            "将鼠标移动到文章底部的【评论区图标/按钮】"
-        ),
-    },
-    {
-        "section": "official",
-        "key": "comment_region",
-        "type": "region",
-        "title": "公众号 - 评论区 + 正文区（弹窗）",
-        "instructions": (
-            "在弹窗中的公众号文章里，\n"
-            "第一次按 F8: 记录区域【左上角】\n"
-            "第二次按 F8: 记录区域【右下角】"
-        ),
-    },
-    # ── Popup window: 视频号 ──
-    # NOTE: 倍速相关暂时挂起（录屏功能已注释）
-    # {
-    #     "section": "channels",
-    #     "key": "speed_button",
-    #     "type": "point",
-    #     "title": "视频号 - 倍速按钮（弹窗）",
-    #     "instructions": (
-    #         "在弹窗中打开一个视频号视频，\n"
-    #         "将鼠标移动到视频播放器中的【倍速按钮】位置\n"
-    #         "（悬浮此处会弹出倍速选项菜单）"
-    #     ),
-    # },
-    # {
-    #     "section": "channels",
-    #     "key": "speed_option",
-    #     "type": "point",
-    #     "title": "视频号 - 倍速选项 2.0x（弹窗）",
-    #     "instructions": (
-    #         "先将鼠标悬浮在倍速按钮上让菜单弹出，\n"
-    #         "然后将鼠标移动到菜单中的【2.0x 倍速选项】位置并记录\n"
-    #         "（如果不支持 2.0x，请记录最快的倍速选项）"
-    #     ),
-    # },
-    {
-        "section": "channels",
-        "key": "pause_video",
-        "type": "point",
-        "title": "视频号 - 视频区域中心（弹窗）",
-        "instructions": (
-            "在弹窗中打开一个视频号视频，\n"
-            "将鼠标移动到视频播放区域的中心位置（用于暂停视频）"
-        ),
-    },
-    {
-        "section": "channels",
-        "key": "comment_button",
-        "type": "point",
-        "title": "视频号 - 评论按钮（弹窗）",
-        "instructions": (
-            "在弹窗的视频号页面，\n"
-            "将鼠标移动到右侧或底部的【评论按钮】"
-        ),
-    },
-    {
-        "section": "channels",
-        "key": "comment_panel_region",
-        "type": "region",
-        "title": "视频号 - 评论面板区域（弹窗）",
-        "instructions": (
-            "在弹窗中打开评论面板，\n"
-            "第一次按 F8: 记录评论面板【左上角】\n"
-            "第二次按 F8: 记录评论面板【右下角】"
-        ),
-    },
-    # NOTE: video_area（视频播放区域）已移除——视频号口播改在线解析
-    # (sph→元宝→finder-preview→MiMo)，录屏路径 _extract_narration 不再调用。
-]
+def _step_to_screen_point(
+    step: CalibrationStep, rect,
+) -> tuple[int, int] | None:
+    """Convert a step's default ratios to screen coordinates."""
+    if step.default_x_ratio is None or step.default_y_ratio is None:
+        return None
+    x = rect.left + round(rect.width * step.default_x_ratio)
+    y = rect.top + round(rect.height * step.default_y_ratio)
+    return (x, y)
+
+
+def _step_to_screen_region(
+    step: CalibrationStep, rect,
+) -> tuple[int, int, int, int] | None:
+    """Convert a step's default region ratios to screen coordinates."""
+    if step.default_left_ratio is None or step.default_top_ratio is None:
+        return None
+    left = rect.left + round(rect.width * step.default_left_ratio)
+    top = rect.top + round(rect.height * step.default_top_ratio)
+    w = round(rect.width * (step.default_width_ratio or 0.4))
+    h = round(rect.height * (step.default_height_ratio or 0.7))
+    return (left, top, w, h)
 
 
 class WechatCalibratorV417:
     """Interactive calibration for WeChat 4.1.7 dual-window layout."""
 
-    def __init__(self):
+    def __init__(self, use_overlay: bool = True):
         self._window_mgr = WechatWindowManagerV417()
         self._data: dict = {
             "wechat_main": {},
@@ -165,6 +96,8 @@ class WechatCalibratorV417:
             "channels": {},
         }
         self._skipped: list[str] = []
+        self._use_overlay = use_overlay
+        self._overlay: CalibrationOverlay | None = None
 
     def calibrate_all(self) -> bool:
         print("\n" + "=" * 60)
@@ -174,6 +107,7 @@ class WechatCalibratorV417:
         print("此工具将校准微信 4.1.7 的 UI 元素坐标。")
         print()
         print("操作方式：")
+        print("  F5 — 使用推荐位置（黄色圆点指示）")
         print("  F8 — 记录当前鼠标位置")
         print("  F9 — 跳过当前步骤")
         print("  Esc — 退出校准")
@@ -182,17 +116,34 @@ class WechatCalibratorV417:
         print("      official/channels 坐标基于弹窗（Chrome_WidgetWin_0）。")
         print()
 
+        # Start overlay
+        if self._use_overlay:
+            self._overlay = CalibrationOverlay()
+            if not self._overlay.start():
+                print("  [提示] Overlay 创建失败，将使用纯文字模式。")
+                self._overlay = None
+            else:
+                print("  [提示] 屏幕叠加层已启用（绿色十字线 + 黄色推荐点）")
+
+        try:
+            return self._run_steps()
+        finally:
+            if self._overlay:
+                self._overlay.stop()
+
+    def _run_steps(self) -> bool:
+        """Internal: run all calibration steps."""
         # Find main window
         if not self._ensure_main_window():
             return False
 
-        total = len(CALIBRATION_STEPS)
+        total = len(STEPS_V417)
         success_count = 0
 
-        for i, step in enumerate(CALIBRATION_STEPS, 1):
-            section = step["section"]
-            key = step["key"]
-            step_type = step["type"]
+        for i, step in enumerate(STEPS_V417, 1):
+            section = step.section
+            key = step.key
+            step_type = step.type
 
             # Determine which rect to use
             if section == "wechat_main":
@@ -225,89 +176,27 @@ class WechatCalibratorV417:
             print()
             print("=" * 60)
             print(
-                f"  [{i}/{total}] {step['title']}  "
+                f"  [{i}/{total}] {step.title}  "
                 f"({'点击位置' if step_type == 'point' else '矩形区域'})"
             )
             print("=" * 60)
-            print(f"  {step['instructions']}")
+            print(f"  {step.instructions}")
 
             if step_type == "point":
-                vk = _wait_for_key(
-                    VK_F8, VK_F9, VK_ESCAPE,
-                    prompt="移动鼠标 → 按 F8 记录 | F9 跳过 | Esc 退出",
-                )
-                if vk == VK_ESCAPE:
-                    print("  [退出] 用户取消\n")
-                    break
-                if vk == VK_F9:
-                    print(f"  [跳过] {step['title']}")
-                    self._skipped.append(f"{section}.{key}")
-                    continue
-
-                try:
-                    abs_x, abs_y = pyautogui.position()
-                    x_ratio = (abs_x - rect.left) / rect.width
-                    y_ratio = (abs_y - rect.top) / rect.height
-                    self._data[section][key] = {
-                        "x_ratio": round(x_ratio, 4),
-                        "y_ratio": round(y_ratio, 4),
-                    }
-                    print(
-                        f"  [OK] 屏幕({abs_x}, {abs_y}) → "
-                        f"相对({x_ratio:.4f}, {y_ratio:.4f})"
-                    )
-                    success_count += 1
-                except Exception as e:
-                    print(f"  [错误] {e}")
-                    self._skipped.append(f"{section}.{key}")
-
+                result = self._record_point(i, total, step, rect)
             else:
-                vk1 = _wait_for_key(
-                    VK_F8, VK_F9, VK_ESCAPE,
-                    prompt="移动鼠标到【左上角】→ 按 F8 | F9 跳过",
-                )
-                if vk1 == VK_ESCAPE:
-                    print("  [退出] 用户取消\n")
-                    break
-                if vk1 == VK_F9:
-                    print(f"  [跳过] {step['title']}")
-                    self._skipped.append(f"{section}.{key}")
-                    continue
+                result = self._record_region(i, total, step, rect)
 
-                try:
-                    left_x, top_y = pyautogui.position()
-                    print(f"  左上角: 屏幕({left_x}, {top_y})")
+            if result == "quit":
+                break
+            elif result == "skip":
+                self._skipped.append(f"{section}.{key}")
+                continue
+            elif result == "ok":
+                success_count += 1
 
-                    vk2 = _wait_for_key(
-                        VK_F8, VK_ESCAPE,
-                        prompt="移动鼠标到【右下角】→ 按 F8 记录",
-                    )
-                    if vk2 == VK_ESCAPE:
-                        print("  [退出] 用户取消\n")
-                        break
-
-                    right_x, bottom_y = pyautogui.position()
-                    print(f"  右下角: 屏幕({right_x}, {bottom_y})")
-
-                    left_ratio = (left_x - rect.left) / rect.width
-                    top_ratio = (top_y - rect.top) / rect.height
-                    width_ratio = (right_x - left_x) / rect.width
-                    height_ratio = (bottom_y - top_y) / rect.height
-
-                    self._data[section][key] = {
-                        "left_ratio": round(left_ratio, 4),
-                        "top_ratio": round(top_ratio, 4),
-                        "width_ratio": round(width_ratio, 4),
-                        "height_ratio": round(height_ratio, 4),
-                    }
-                    print(
-                        f"  [OK] 区域: left={left_ratio:.4f} top={top_ratio:.4f} "
-                        f"w={width_ratio:.4f} h={height_ratio:.4f}"
-                    )
-                    success_count += 1
-                except Exception as e:
-                    print(f"  [错误] {e}")
-                    self._skipped.append(f"{section}.{key}")
+        if self._overlay:
+            self._overlay.hide()
 
         if success_count == 0:
             print("\n没有记录任何坐标，取消保存。")
@@ -315,6 +204,153 @@ class WechatCalibratorV417:
 
         self._save()
         return True
+
+    def _record_point(self, i: int, total: int, step: CalibrationStep, rect) -> str:
+        """Record a point calibration step."""
+        rec = _step_to_screen_point(step, rect)
+        rec_x, rec_y = rec if rec else (None, None)
+
+        mx, my = pyautogui.position()
+
+        label = f"[{i}/{total}] {step.title} | F8 记录 · "
+        if rec:
+            label += "F5 接受推荐 · "
+        label += "F9 跳过"
+
+        if self._overlay:
+            self._overlay.show_point_mode(mx, my, rec_x, rec_y, label)
+
+        if rec:
+            vk_keys = (VK_F5, VK_F8, VK_F9, VK_ESCAPE)
+            prompt = "移动鼠标 → F8 记录 | F5 使用推荐位置 | F9 跳过 | Esc 退出"
+        else:
+            vk_keys = (VK_F8, VK_F9, VK_ESCAPE)
+            prompt = "移动鼠标 → F8 记录 | F9 跳过 | Esc 退出"
+
+        vk = _wait_for_key(*vk_keys, prompt=prompt)
+
+        if vk == VK_ESCAPE:
+            print("  [退出] 用户取消\n")
+            return "quit"
+        if vk == VK_F9:
+            print(f"  [跳过] {step.title}")
+            return "skip"
+
+        try:
+            if vk == VK_F5 and rec:
+                abs_x, abs_y = rec
+                print(f"  [推荐] 使用推荐坐标: 屏幕({abs_x}, {abs_y})")
+            else:
+                abs_x, abs_y = pyautogui.position()
+
+            x_ratio = (abs_x - rect.left) / rect.width
+            y_ratio = (abs_y - rect.top) / rect.height
+            self._data[step.section][step.key] = {
+                "x_ratio": round(x_ratio, 4),
+                "y_ratio": round(y_ratio, 4),
+            }
+            print(
+                f"  [OK] 屏幕({abs_x}, {abs_y}) → "
+                f"相对({x_ratio:.4f}, {y_ratio:.4f})"
+            )
+
+            result = validate_point(x_ratio, y_ratio, step)
+            if result.level != "ok":
+                print(f"\n  {result.message}")
+
+        except Exception as e:
+            print(f"  [错误] {e}")
+            return "skip"
+
+        return "ok"
+
+    def _record_region(self, i: int, total: int, step: CalibrationStep, rect) -> str:
+        """Record a region calibration step."""
+        rec_reg = _step_to_screen_region(step, rect)
+
+        # ── First corner ──
+        mx, my = pyautogui.position()
+        label = f"[{i}/{total}] {step.title} | 第1点: 左上角"
+
+        if self._overlay:
+            self._overlay.show_region_first(
+                mx, my,
+                rec_reg[0] if rec_reg else None,
+                rec_reg[1] if rec_reg else None,
+                rec_reg[2] if rec_reg else None,
+                rec_reg[3] if rec_reg else None,
+                label,
+            )
+
+        vk1 = _wait_for_key(
+            VK_F8, VK_F9, VK_ESCAPE,
+            prompt="移动鼠标到【左上角】→ 按 F8 | F9 跳过",
+        )
+        if vk1 == VK_ESCAPE:
+            print("  [退出] 用户取消\n")
+            return "quit"
+        if vk1 == VK_F9:
+            print(f"  [跳过] {step.title}")
+            return "skip"
+
+        try:
+            left_x, top_y = pyautogui.position()
+            print(f"  左上角: 屏幕({left_x}, {top_y})")
+
+            label2 = (
+                f"[{i}/{total}] {step.title} | 第2点: 右下角 "
+                f"(框选区域 {abs(left_x)}..→ , {abs(top_y)}..↓)"
+            )
+
+            if self._overlay:
+                self._overlay.show_region_second(
+                    left_x, top_y,
+                    mx, my,
+                    rec_reg[0] if rec_reg else None,
+                    rec_reg[1] if rec_reg else None,
+                    rec_reg[2] if rec_reg else None,
+                    rec_reg[3] if rec_reg else None,
+                    label2,
+                )
+
+            vk2 = _wait_for_key(
+                VK_F8, VK_ESCAPE,
+                prompt="移动鼠标到【右下角】→ 按 F8 记录",
+            )
+            if vk2 == VK_ESCAPE:
+                print("  [退出] 用户取消\n")
+                return "quit"
+
+            right_x, bottom_y = pyautogui.position()
+            print(f"  右下角: 屏幕({right_x}, {bottom_y})")
+
+            left_ratio = (left_x - rect.left) / rect.width
+            top_ratio = (top_y - rect.top) / rect.height
+            width_ratio = (right_x - left_x) / rect.width
+            height_ratio = (bottom_y - top_y) / rect.height
+
+            self._data[step.section][step.key] = {
+                "left_ratio": round(left_ratio, 4),
+                "top_ratio": round(top_ratio, 4),
+                "width_ratio": round(width_ratio, 4),
+                "height_ratio": round(height_ratio, 4),
+            }
+            print(
+                f"  [OK] 区域: left={left_ratio:.4f} top={top_ratio:.4f} "
+                f"w={width_ratio:.4f} h={height_ratio:.4f}"
+            )
+
+            result = validate_region(
+                left_ratio, top_ratio, width_ratio, height_ratio, step,
+            )
+            if result.level != "ok":
+                print(f"\n  {result.message}")
+
+        except Exception as e:
+            print(f"  [错误] {e}")
+            return "skip"
+
+        return "ok"
 
     def _ensure_main_window(self) -> bool:
         print("正在查找微信主窗口...")

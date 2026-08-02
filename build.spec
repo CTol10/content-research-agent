@@ -58,7 +58,12 @@ a = Analysis(
         'scrapers.wechat.v417.channels_pc',
         'scrapers.wechat.v417.window_manager',
         'scrapers.wechat.v417.calibrator',
+        'scrapers.wechat.calibration',
+        'scrapers.wechat.calibration.models',
+        'scrapers.wechat.calibration.validator',
+        'scrapers.wechat.calibration.overlay',
         'scrapers.toutiao',
+        'scrapers.bilibili',
         'scrapers.comment_cleaner',
         'playwright',
         'playwright.async_api',
@@ -102,7 +107,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['pytest', 'mitmproxy', 'pywinauto'],
+    excludes=['pytest', 'mitmproxy', 'pywinauto', 'tkinter', 'Tkinter',
+              '_tkinter', 'tcl', 'tk', 'setuptools', 'pkg_resources',
+              'pygments', 'PIL.ImageTk', 'unittest', 'test'],
     noarchive=False,
 )
 

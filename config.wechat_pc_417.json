@@ -1,0 +1,63 @@
+{
+  "active_profile": "v417_default",
+  "profiles": {
+    "v417_default": {
+      "meta": {
+        "wechat_version": "4.1.7",
+        "dpi_scale": 1.0,
+        "calibrated_at": "2026-07-16T07:20:22.529429+00:00",
+        "window_rect": {
+          "left": 340,
+          "top": 399,
+          "width": 1004,
+          "height": 878
+        }
+      },
+      "wechat_main": {
+        "search_bar": {
+          "x_ratio": 0.2211,
+          "y_ratio": 0.0467
+        }
+      },
+      "official": {
+        "result_open_entry": {
+          "x_ratio": 0.8761,
+          "y_ratio": 0.1575
+        },
+        "comment_icon": {
+          "x_ratio": 0.8815,
+          "y_ratio": 0.9499
+        },
+        "comment_region": {
+          "left_ratio": 0.2855,
+          "top_ratio": 0.1032,
+          "width_ratio": 0.6948,
+          "height_ratio": 0.8029
+        }
+      },
+      "channels": {
+        "pause_video": {
+          "x_ratio": 0.4973,
+          "y_ratio": 0.4369
+        },
+        "comment_button": {
+          "x_ratio": 0.9031,
+          "y_ratio": 0.9312
+        },
+        "comment_panel_region": {
+          "left_ratio": 0.386,
+          "top_ratio": 0.1147,
+          "width_ratio": 0.5889,
+          "height_ratio": 0.8008
+        },
+        "video_area": {
+          "left_ratio": 0.0251,
+          "top_ratio": 0.0438,
+          "width_ratio": 0.9264,
+          "height_ratio": 0.7894
+        },
+        "audio_device": ""
+      }
+    }
+  }
+}

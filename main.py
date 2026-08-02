@@ -354,6 +354,7 @@ _PLATFORM_DISPLAY = {
     "toutiao": "今日头条",
     "wechat": "微信公众号",
     "wechat_channels": "微信视频号",
+    "bilibili": "哔哩哔哩",
 }
 
 
@@ -423,19 +424,21 @@ async def login_platform(platform_key: str, wait_seconds: int = 300):
     from scrapers.xiaohongshu import XiaohongshuScraper
     from scrapers.weibo import WeiboScraper
     from scrapers.toutiao import ToutiaoScraper
+    from scrapers.bilibili import BilibiliScraper
 
     scraper_map = {
         "douyin": DouyinScraper,
         "xiaohongshu": XiaohongshuScraper,
         "weibo": WeiboScraper,
         "toutiao": ToutiaoScraper,
+        "bilibili": BilibiliScraper,
     }
     scraper_cls = scraper_map.get(platform_key)
     if not scraper_cls:
         print(f"[错误] 未知平台: {platform_key}，支持的平台: {', '.join(scraper_map.keys())}")
         return
     scraper = scraper_cls()
-    await scraper.login_interactive(wait_seconds=wait_seconds)
+    await scraper.wait_for_login(timeout=wait_seconds)
 
 
 async def login_open_all(platform_keys: list[str]):
@@ -444,12 +447,14 @@ async def login_open_all(platform_keys: list[str]):
     from scrapers.xiaohongshu import XiaohongshuScraper
     from scrapers.weibo import WeiboScraper
     from scrapers.toutiao import ToutiaoScraper
+    from scrapers.bilibili import BilibiliScraper
 
     scraper_map = {
         "douyin": DouyinScraper,
         "xiaohongshu": XiaohongshuScraper,
         "weibo": WeiboScraper,
         "toutiao": ToutiaoScraper,
+        "bilibili": BilibiliScraper,
     }
 
     missing = check_cookies(platform_keys)
@@ -530,6 +535,7 @@ async def run_all(input_file, platforms_filter=None, resume=False, batch_size=0,
     from scrapers.wechat import get_official_scraper, get_channels_scraper
     from scrapers.weibo import WeiboScraper
     from scrapers.toutiao import ToutiaoScraper
+    from scrapers.bilibili import BilibiliScraper
 
     scraper_classes = {
         "douyin": DouyinScraper,
@@ -538,6 +544,7 @@ async def run_all(input_file, platforms_filter=None, resume=False, batch_size=0,
         "wechat_channels": lambda: get_channels_scraper(),
         "weibo": WeiboScraper,
         "toutiao": ToutiaoScraper,
+        "bilibili": BilibiliScraper,
     }
 
     rows = read_input_excel(input_file)
@@ -593,6 +600,7 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
     from scrapers.wechat import get_official_scraper, get_channels_scraper
     from scrapers.toutiao import ToutiaoScraper
     from scrapers.weibo import WeiboScraper
+    from scrapers.bilibili import BilibiliScraper
 
     scraper_classes = {
         "douyin": DouyinScraper,
@@ -601,6 +609,7 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
         "wechat_channels": lambda: get_channels_scraper(),
         "toutiao": ToutiaoScraper,
         "weibo": WeiboScraper,
+        "bilibili": BilibiliScraper,
     }
 
     rows = read_input_excel(input_file)
@@ -1086,6 +1095,8 @@ def main():
                         help="微信操作模式: pc(桌面相对坐标,默认) browser(浏览器) auto(自动选择)")
     parser.add_argument("--wechat-calibrate", action="store_true",
                         help="校准微信PC桌面坐标（交互式点击记录UI元素位置）")
+    parser.add_argument("--no-overlay", action="store_true",
+                        help="校准时不显示屏幕叠加层（纯文字模式）")
     parser.add_argument("--headless", action="store_true",
                         help="无头模式运行浏览器（非微信平台适用）")
     args = parser.parse_args()
@@ -1114,13 +1125,14 @@ def main():
     # Handle --wechat-calibrate (before any run/login flow)
     if args.wechat_calibrate:
         from scrapers.wechat import detect_version
+        use_overlay = not args.no_overlay
         version = detect_version()
         if version == "4.1.7":
             from scrapers.wechat.v417.calibrator import WechatCalibratorV417
-            calibrator = WechatCalibratorV417()
+            calibrator = WechatCalibratorV417(use_overlay=use_overlay)
         else:
             from scrapers.wechat_calibrator import WechatCalibrator
-            calibrator = WechatCalibrator()
+            calibrator = WechatCalibrator(use_overlay=use_overlay)
         ok = calibrator.calibrate_all()
         sys.exit(0 if ok else 1)
 
@@ -1148,7 +1160,7 @@ def main():
         print(f"请将 .xlsx 文件放到 input/ 目录下")
         sys.exit(1)
 
-    all_platforms = ["douyin", "xiaohongshu", "weibo", "toutiao"]
+    all_platforms = ["douyin", "xiaohongshu", "weibo", "toutiao", "bilibili"]
 
     if args.run:
         platforms_filter = None

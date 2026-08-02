@@ -48,6 +48,7 @@ PLATFORM_PATTERNS: dict[str, list[str]] = {
     "wechat_channels": ["channels.weixin.qq.com", "weixin.qq.com/sph"],
     "toutiao": ["toutiao.com"],
     "weibo": ["weibo.com"],
+    "bilibili": ["bilibili.com", "b23.tv"],
 }
 
 # OS detection
