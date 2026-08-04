@@ -15,3 +15,6 @@ _check_*.json
 test_*.py
 tests/
 *_test.py
+
+# WorkBuddy tool state
+.workbuddy/

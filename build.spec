@@ -25,6 +25,9 @@ a = Analysis(
     binaries=[],
     datas=[
         ('config.ini.example', '.'),
+        # 内置默认微信 4.1.7 坐标配置——首次运行自动落地到 exe 同目录，
+        # 用户重新校准后会以同目录文件覆盖（内置默认不重复覆盖）。
+        ('config.wechat_pc_417.json', '.'),
         ('input', 'input'),
     ] + _rapidocr_datas,
     hiddenimports=[

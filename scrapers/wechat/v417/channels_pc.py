@@ -397,48 +397,6 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
 
     # ── Comment extraction ─────────────────────────────────────────
 
-    def _measure_px_per_click(
-        self, left: int, top: int, width: int, height: int,
-        cx: int, cy: int, test_clicks: int = 3,
-    ) -> float:
-        """Measure actual pixels scrolled per wheel click."""
-        from PIL import Image
-        import numpy as np
-
-        before = pyautogui.screenshot(region=(left, top, width, height))
-        before_gray = np.array(before.convert("L"), dtype=np.int16)
-
-        self._scroll_spaced(test_clicks, cx, cy)
-        time.sleep(0.5)
-
-        after = pyautogui.screenshot(region=(left, top, width, height))
-        after_gray = np.array(after.convert("L"), dtype=np.int16)
-
-        strip_h = min(40, height // 4)
-        if strip_h < 10:
-            return 25.0
-
-        template = before_gray[:strip_h, :]
-        best_offset = 0
-        best_diff = float("inf")
-        max_search = height - strip_h
-        for offset in range(0, max_search, 1):
-            candidate = after_gray[offset:offset + strip_h, :]
-            diff = np.sum(np.abs(template - candidate))
-            if diff < best_diff:
-                best_diff = diff
-                best_offset = offset
-
-        if best_offset <= 2:
-            return 25.0
-
-        px_per_click = best_offset / test_clicks
-        logger.info(
-            f"[wechat_channels_v417] Measured scroll: {best_offset}px "
-            f"over {test_clicks} clicks → {px_per_click:.1f} px/click"
-        )
-        return px_per_click
-
     def _extract_comments(
         self, max_scrolls: int = 80, scroll_fraction: float = 0.67,
     ) -> list[tuple[str, str]]:

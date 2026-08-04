@@ -251,7 +251,15 @@ def read_input_excel(filepath) -> list[dict]:
 
 
 def _resolve_config_path(filename: str) -> Path | None:
-    """Resolve a config file path — looks in CWD only."""
+    """Resolve a config file path — checks exe directory first, then CWD.
+
+    scraper 实际按 config.BASE_DIR（exe 同目录）读取；这里保持同序，
+    避免 CWD≠exe 目录时误判配置缺失（例如从其他目录调起 exe）。
+    """
+    import config
+    base_path = config.BASE_DIR / filename
+    if base_path.exists():
+        return base_path
     cwd_path = Path(filename)
     if cwd_path.exists():
         return cwd_path
@@ -345,6 +353,52 @@ def _offer_calibration_v2(version: str, module_name: str, class_name: str):
         print("\n  校准未完成，无法继续。")
         sys.exit(1)
     print("\n  校准完成，继续抓取流程...\n")
+
+
+def run_wechat_calibration(use_overlay: bool = True) -> bool:
+    """Run version-appropriate WeChat PC coordinate calibration."""
+    from scrapers.wechat import detect_version
+    version = detect_version()
+    if version == "4.1.7":
+        from scrapers.wechat.v417.calibrator import WechatCalibratorV417
+        calibrator = WechatCalibratorV417(use_overlay=use_overlay)
+    else:
+        from scrapers.wechat_calibrator import WechatCalibrator
+        calibrator = WechatCalibrator(use_overlay=use_overlay)
+    return bool(calibrator.calibrate_all())
+
+
+def _show_startup_menu(args) -> bool:
+    """裸运行（无动作参数）启动菜单：抓取 / 校准 / 退出。
+
+    Returns True 表示继续抓取，False 表示退出。
+    """
+    while True:
+        print()
+        print("=" * 60)
+        print("  请选择操作：")
+        print("    [1] 开始抓取")
+        print("    [2] 校准微信坐标（内置默认坐标不匹配时使用）")
+        print("    [3] 退出")
+        print("=" * 60)
+        try:
+            choice = input("  请选择 [1/2/3]（默认 1）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  已退出。")
+            return False
+        if choice in ("", "1"):
+            return True
+        if choice == "2":
+            ok = run_wechat_calibration(use_overlay=not args.no_overlay)
+            if ok:
+                print("\n  校准完成。可重新选择开始抓取。\n")
+            else:
+                print("\n  校准未完成，可重试或退出。\n")
+            continue
+        if choice == "3":
+            print("  再见！")
+            return False
+        print("  无效输入，请重新选择。")
 
 
 _PLATFORM_DISPLAY = {
@@ -1122,18 +1176,15 @@ def main():
     config.COOKIE_DIR.mkdir(parents=True, exist_ok=True)
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # 落地内置默认微信坐标配置（冻结运行时首次启动自动写入 exe 同目录）。
+    # 必须在版本推断 / 校准检查之前调用，保证 detect_version() 与
+    # _ensure_wechat_config() 能看到落地后的默认配置。
+    from scrapers.wechat import ensure_default_wechat_config
+    ensure_default_wechat_config()
+
     # Handle --wechat-calibrate (before any run/login flow)
     if args.wechat_calibrate:
-        from scrapers.wechat import detect_version
-        use_overlay = not args.no_overlay
-        version = detect_version()
-        if version == "4.1.7":
-            from scrapers.wechat.v417.calibrator import WechatCalibratorV417
-            calibrator = WechatCalibratorV417(use_overlay=use_overlay)
-        else:
-            from scrapers.wechat_calibrator import WechatCalibrator
-            calibrator = WechatCalibrator(use_overlay=use_overlay)
-        ok = calibrator.calibrate_all()
+        ok = run_wechat_calibration(use_overlay=not args.no_overlay)
         sys.exit(0 if ok else 1)
 
     # Pre-check: if WeChat platforms are requested, ensure calibration exists
@@ -1153,6 +1204,14 @@ def main():
             print("  [提示] 未配置 MiMo API Key，分类功能将被跳过。")
             print("  配置方法: 编辑同目录下的 config.ini 文件")
         print()
+
+    # 裸运行（无动作参数）：显示启动菜单，提供抓取/校准/退出入口。
+    # 放在输入文件检查之前，保证没有输入 Excel 时也能进入校准模式。
+    bare_run = not (args.run or args.login or args.login_open or
+                    args.login_save or args.login_yuanbao)
+    if bare_run:
+        if not _show_startup_menu(args):
+            sys.exit(0)
 
     input_file = args.input if args.input else str(config.INPUT_FILE)
     if not Path(input_file).exists():
@@ -1202,6 +1261,7 @@ def main():
         ok = asyncio.run(ChannelsSphParser.login_interactive(wait_seconds=args.login_timeout))
         sys.exit(0 if ok else 1)
     else:
+        # 裸运行到达这里：启动菜单已确认开始抓取
         platforms_filter = None
         if args.platforms:
             platforms_filter = [p.strip() for p in args.platforms.split(",") if p.strip()]

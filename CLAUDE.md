@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Multi-platform Chinese social media comment scraper. Reads post URLs from an Excel file, uses Playwright browser automation to scrape all comments (including replies) from 4 platforms, and outputs per-post Excel files plus a summary report.
+Multi-platform Chinese social media comment scraper. Reads post URLs from an Excel file, uses Playwright browser automation to scrape all comments (including replies) from 5 platforms, and outputs per-post Excel files plus a summary report.
 
-Supported platforms: Douyin (抖音), Xiaohongshu (小红书), Toutiao (今日头条), Weibo (新浪微博).
+Supported platforms: Douyin (抖音), Xiaohongshu (小红书), Toutiao (今日头条), Weibo (新浪微博), Bilibili (哔哩哔哩).
 
 WeChat platforms use PC desktop automation: WeChat Official Accounts (微信公众号) and WeChat Channels (微信视频号) — require WeChat PC client running with `--wechat-mode pc` (default).
 
@@ -58,6 +58,7 @@ python main.py --input path/to/custom.xlsx    # custom input
 - **Xiaohongshu**: Persistent browser context, interleaved scroll-and-expand cycles
 - **Toutiao**: Comment panel button click, multi-strategy DOM extraction
 - **Weibo**: API response interception (buildComments endpoint), pagination via max_id
+- **Bilibili**: API 直取 (BVID → view/playurl 接口 + 评论分页), b23.tv 短链解析
 - **WeChat Official Accounts (PC)**: Window-relative coordinates + OCR extraction via `WechatOfficialPcScraper`
 - **WeChat Channels (PC)**: Window-relative coordinates + OCR extraction via `WechatChannelsPcScraper`
 

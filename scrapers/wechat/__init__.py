@@ -14,7 +14,10 @@ Detection: scans visible WeChat windows for class names.
 import ctypes
 import ctypes.wintypes
 import logging
+import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 import config
 
@@ -50,6 +53,30 @@ def _infer_version_by_config() -> str:
     except Exception:  # noqa: BLE001
         pass
     return "4.1.11"
+
+
+def ensure_default_wechat_config() -> None:
+    """冻结运行时，把内置默认的 4.1.7 坐标配置落地到 exe 同目录。
+
+    首次运行（exe 同目录无 config.wechat_pc_417.json）时从打包的
+    _MEIPASS 拷出默认配置，开箱即用。用户重新校准后会生成同目录文件，
+    已存在则不再覆盖——用户配置优先。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    target = config.BASE_DIR / "config.wechat_pc_417.json"
+    if target.exists():
+        return
+    bundled = Path(getattr(sys, "_MEIPASS", "")) / "config.wechat_pc_417.json"
+    if not bundled.exists():
+        return
+    try:
+        shutil.copyfile(bundled, target)
+        print(f"已使用内置默认坐标配置（微信 4.1.7），已写入: {target}")
+        print("如果你的微信窗口布局不同，可运行 --wechat-calibrate 重新校准。")
+        logger.info(f"[wechat] Materialized default config to {target}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[wechat] 落地默认配置失败: {e}")
 
 
 def detect_version() -> str:
@@ -165,6 +192,7 @@ def get_channels_scraper():
 
 __all__ = [
     "detect_version",
+    "ensure_default_wechat_config",
     "get_official_scraper",
     "get_channels_scraper",
     "OfficialV411", "ChannelsV411", "WindowManagerV411",

@@ -11,7 +11,6 @@ import time
 
 import pyautogui
 
-import config
 from scrapers.wechat.v417.base import WechatPcBaseScraperV417
 
 logger = logging.getLogger(__name__)
@@ -52,10 +51,7 @@ class WechatOfficialPcScraperV417(WechatPcBaseScraperV417):
             self.click_key("official", "comment_icon", "评论区图标")
             time.sleep(1.5)
 
-            # Step 5: Scroll + expand comments (same logic as 4.1.11)
-            self._scroll_and_expand_comments()
-
-            # Step 6: Extract comments via OCR
+            # Step 5: 滚轮滚动展开 + OCR 提取评论（视频号同款，不依赖悬浮滚动条）
             comments = self._extract_comments()
             logger.info(f"[wechat_v417] Total comments: {len(comments)}")
 
@@ -107,170 +103,116 @@ class WechatOfficialPcScraperV417(WechatPcBaseScraperV417):
         # Article loads in the same popup — wait a bit
         time.sleep(2)
 
-    # ── Scrolling + expand ─────────────────────────────────────────
+    # ── Comment extraction (wheel-scroll, 视频号同款) ────────────────
 
-    def _scroll_and_expand_comments(self, max_scrolls: int = 80) -> None:
-        """Scroll through comments in the popup, clicking expand buttons."""
+    def _scroll_anchor(self) -> tuple[int, int]:
+        """滚动锚点：评论区打开后，弹窗右三分之一（评论列表区域）。
+
+        评论面板是弹窗右侧的滚动列表；右三分之一远离正文/图片/链接按钮，
+        滚轮事件能安全落在评论列表上。垂直取评论区域中心。
+        """
+        popup = self.window_mgr.get_popup_rect()
+        _, region_top, _, region_h = \
+            self.resolve_region("official", "comment_region")
+        anchor_x = popup.left + popup.width * 5 // 6
+        anchor_y = region_top + region_h // 2
+        return anchor_x, anchor_y
+
+    def _extract_comments(
+        self, max_scrolls: int = 80, scroll_fraction: float = 0.67,
+    ) -> list[tuple[str, str]]:
+        """滚轮滚动展开 + OCR 提取评论（视频号同款单循环）。
+
+        每轮：点展开按钮 → OCR 当前屏 → 滚轮滚 2/3 屏 → 截图 diff 判到底。
+        不再依赖 CEF 悬浮滚动条（窗口失焦/未显示时会拖不动，只抓到第一屏）。
+        """
+        from scrapers.wechat.ocr import merge_comment_fragments
+
+        raw: list[tuple[str, str]] = []
+        no_change_count = 0
+        total_expanded = 0
+
         region_left, region_top, region_w, region_h = \
             self.resolve_region("official", "comment_region")
-        # Click at very top-right corner to avoid hitting links/images
-        # in the comment content area (focus transfer only)
+        cx, cy = self._scroll_anchor()
+
+        # 聚焦评论面板（点右上角空白处，避开链接/图片）
+        pyautogui.moveTo(cx, cy, duration=0.1)
+        time.sleep(0.2)
         focus_x = region_left + region_w - 10
         focus_y = region_top + 10
-
         pyautogui.click(focus_x, focus_y)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
-        # Check scrollbar
-        has_scrollbar = (
-            self._find_scrollbar_thumb("official", "comment_region") is not None
+        # 实测每格滚轮像素，确定每步滚轮量
+        px_per_click = self._measure_px_per_click(
+            region_left, region_top, region_w, region_h, cx, cy,
         )
-        if not has_scrollbar:
-            logger.info("[wechat_v417] No scrollbar — single-screen page")
+        target_px = round(region_h * scroll_fraction)
+        scroll_clicks = max(1, round(target_px / px_per_click)) * 30
+        logger.info(
+            f"[wechat_v417] Scroll step: {scroll_clicks} clicks "
+            f"(target={target_px}px, measured={px_per_click:.1f} px/click)"
+        )
 
-        total_expanded = 0
         prev_img = self.screenshot_region_as_image(
-            "official", "comment_region", "expand_00_before"
+            "official", "comment_region", "scroll_00_before"
         )
-
-        # First screen expand buttons before any scroll
-        buttons = self.find_expand_buttons(
-            "official", "comment_region", "expand_first_screen"
-        )
-        if buttons:
-            logger.info(f"[wechat_v417] First screen: {len(buttons)} expand buttons")
-            for btn in buttons:
-                self.click_point(btn["screen_x"], btn["screen_y"], f"展开:{btn['text']}")
-                time.sleep(0.3)
-            total_expanded += len(buttons)
-            time.sleep(0.8)
-
-        if not has_scrollbar:
-            logger.info(f"[wechat_v417] Single-screen, {total_expanded} expanded")
-            return
 
         for i in range(max_scrolls):
-            self.scrollbar_scroll_fraction("official", "comment_region", 2 / 3)
-            time.sleep(0.8)
-
-            curr_img = self.screenshot_region_as_image(
+            # 展开回复
+            buttons = self.find_expand_buttons(
                 "official", "comment_region", f"expand_{i:02d}"
             )
+            if buttons:
+                logger.info(
+                    f"[wechat_v417] Scroll {i+1}: {len(buttons)} expand buttons"
+                )
+                for btn in buttons:
+                    self.click_point(
+                        btn["screen_x"], btn["screen_y"], f"展开:{btn['text']}"
+                    )
+                    time.sleep(0.3)
+                total_expanded += len(buttons)
+                time.sleep(0.8)
+                no_change_count = 0  # 展开会新增内容，重置到底计数
 
+            batch = self.ocr_region(
+                "official", "comment_region", f"comments_{i:02d}"
+            )
+            raw.extend(batch)
+
+            if len(batch) == 0:
+                no_change_count += 1
+                if no_change_count >= 5:
+                    break
+            else:
+                no_change_count = 0
+
+            # 滚轮滚动（锚点在弹窗右三分之一，评论列表内；单次发送，速度与视频号一致）
+            pyautogui.scroll(-scroll_clicks, x=cx, y=cy)
+            time.sleep(1.5)
+
+            # 到底检测：滚动后截图与上一屏几乎一致 = 到底
+            curr_img = self.screenshot_region_as_image(
+                "official", "comment_region", f"scroll_{i+1:02d}_after"
+            )
             if self.images_similar(prev_img, curr_img):
                 logger.info(
                     f"[wechat_v417] Scroll {i+1}: no change — "
                     f"reached bottom ({total_expanded} expanded)"
                 )
                 break
-
-            buttons = self.find_expand_buttons(
-                "official", "comment_region", f"expand_{i:02d}"
-            )
-            if buttons:
-                logger.info(f"[wechat_v417] Scroll {i+1}: {len(buttons)} expand buttons")
-                for btn in buttons:
-                    self.click_point(btn["screen_x"], btn["screen_y"], f"展开:{btn['text']}")
-                    time.sleep(0.3)
-                total_expanded += len(buttons)
-                time.sleep(0.8)
-
             prev_img = curr_img
 
-        # Wheel-scroll at bottom to trigger final lazy content
-        logger.info("[wechat_v417] Bottom reached, wheel-scrolling 1000")
-        pyautogui.moveTo(focus_x, focus_y)
-        pyautogui.scroll(-1000)
-        time.sleep(1.5)
-
-        buttons = self.find_expand_buttons(
-            "official", "comment_region", "expand_wheel"
-        )
-        if buttons:
-            logger.info(f"[wechat_v417] Wheel expand: {len(buttons)} buttons")
-            for btn in buttons:
-                self.click_point(btn["screen_x"], btn["screen_y"], f"展开:{btn['text']}")
-                time.sleep(0.3)
-            total_expanded += len(buttons)
+            if i > 0 and i % 5 == 4:
+                logger.debug(
+                    f"[wechat_v417] Scroll {i+1}/{max_scrolls}, "
+                    f"raw pairs: {len(raw)}, expanded: {total_expanded}"
+                )
 
         logger.info(f"[wechat_v417] Expand done: {total_expanded} total")
-
-    # ── Comment extraction ─────────────────────────────────────────
-
-    def _extract_comments(self) -> list[tuple[str, str]]:
-        """OCR extract comments, scroll back to top first."""
-        from scrapers.wechat.ocr import merge_comment_fragments
-
-        region_left, region_top, region_w, region_h = \
-            self.resolve_region("official", "comment_region")
-        focus_x = region_left + region_w // 2
-        focus_y = region_top + region_h // 2
-
-        # Scroll to top
-        logger.debug("[wechat_v417] Scrolling to top for extraction")
-        self.scrollbar_drag_to_top("official", "comment_region")
-        time.sleep(0.5)
-
-        raw: list[tuple[str, str]] = []
-        has_scrollbar = (
-            self._find_scrollbar_thumb("official", "comment_region") is not None
-        )
-
-        if not has_scrollbar:
-            batch = self.ocr_region("official", "comment_region", "extract_single")
-            raw.extend(batch)
-            logger.info(f"[wechat_v417] Single-screen OCR: {len(batch)} pairs")
-            return merge_comment_fragments(raw)
-
-        prev_img = self.screenshot_region_as_image(
-            "official", "comment_region", "extract_00"
-        )
-
-        for i in range(80):
-            batch = self.ocr_region("official", "comment_region", f"extract_{i:02d}")
-            raw.extend(batch)
-            logger.debug(
-                f"[wechat_v417] Screen {i+1}: {len(batch)} OCR pairs, "
-                f"{len(raw)} total raw"
-            )
-
-            self.scrollbar_scroll_fraction("official", "comment_region", 2 / 3)
-            time.sleep(0.8)
-
-            curr_img = self.screenshot_region_as_image(
-                "official", "comment_region", f"extract_{i+1:02d}"
-            )
-
-            if self.images_similar(prev_img, curr_img):
-                logger.info("[wechat_v417] OCR bottom, wheel-scrolling 1000")
-                pyautogui.moveTo(focus_x, focus_y)
-                pyautogui.scroll(-1000)
-                time.sleep(1.5)
-                batch = self.ocr_region(
-                    "official", "comment_region", f"extract_{i+2:02d}_final"
-                )
-                raw.extend(batch)
-                logger.info(f"[wechat_v417] Final OCR: {len(batch)} pairs")
-                break
-
-            prev_img = curr_img
-
         return merge_comment_fragments(raw)
-
-    def _extract_post_content(self) -> str:
-        """Extract article content via OCR from the popup."""
-        try:
-            lines = self.ocr_region_lines("official", "comment_region", "post_content")
-            filtered = [
-                l for l in lines
-                if not l.startswith("评论")
-                and l not in ("回复", "视频号", "搜索")
-                and len(l) > 2
-            ]
-            return "\n".join(filtered[:50])
-        except Exception as e:
-            logger.warning(f"[wechat_v417] Content extraction failed: {e}")
-            return ""
 
     def _fetch_post_content_online(self, url: str) -> str:
         """web 直取公众号正文（裸 HTTP，无需 cookie/元宝/微信客户端）。
@@ -292,101 +234,3 @@ class WechatOfficialPcScraperV417(WechatPcBaseScraperV417):
             logger.warning(f"[wechat_v417] web 直取正文失败: {e}")
             return ""
 
-    # ── Scrollbar helpers (aligned with 4.1.11 base) ────────────────
-
-    def _find_scrollbar_thumb(self, section: str, key: str):
-        """Locate scrollbar thumb in the region's rightmost 24px.
-
-        Hovers first to reveal CEF overlay scrollbars that auto-hide.
-        Returns (sb_cx, thumb_top, thumb_bottom, track_top, track_bottom)
-        in screen coords, or None.
-        """
-        import numpy as np
-
-        left, top, width, height = self.resolve_region(section, key)
-
-        # Sample rightmost 24 px of the region
-        scan_w = min(24, width)
-        scan_left = left + width - scan_w
-
-        # Hover to reveal overlay scrollbar (CEF auto-hides it)
-        pyautogui.moveTo(scan_left + scan_w // 2, top + height // 2, duration=0.1)
-        time.sleep(0.25)
-
-        img = pyautogui.screenshot(region=(scan_left, top, scan_w, height))
-        gray = np.array(img.convert("L"))
-
-        # Save debug strip for visual verification
-        debug_dir = config.OUTPUT_DIR / "debug" / "wechat_pc"
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        from PIL import Image as PILImage
-        PILImage.fromarray(gray).save(
-            str(debug_dir / f"{self.platform_name}_sb_strip.png"))
-
-        col_min = gray.min(axis=1)
-        dark_mask = col_min < 200
-        if not dark_mask.any():
-            return None
-
-        # Find longest continuous dark run (the thumb)
-        runs = []
-        start = None
-        for y in range(len(dark_mask)):
-            if dark_mask[y] and start is None:
-                start = y
-            elif not dark_mask[y] and start is not None:
-                runs.append((start, y - 1))
-                start = None
-        if start is not None:
-            runs.append((start, len(dark_mask) - 1))
-
-        if not runs:
-            return None
-
-        best = max(runs, key=lambda r: r[1] - r[0])
-        thumb_top_rel, thumb_bottom_rel = best
-        track_top = top
-        track_bottom = top + height
-        sb_cx = scan_left + scan_w // 2
-        thumb_top_abs = top + thumb_top_rel
-        thumb_bottom_abs = top + thumb_bottom_rel
-
-        return (sb_cx, thumb_top_abs, thumb_bottom_abs, track_top, track_bottom)
-
-    def scrollbar_scroll_fraction(self, section: str, key: str, fraction: float):
-        """Drag scrollbar thumb down by ``fraction`` of thumb height."""
-        found = self._find_scrollbar_thumb(section, key)
-        if not found:
-            logger.debug("[wechat_v417] no scrollbar thumb for drag")
-            return
-        sb_cx, thumb_top, thumb_bottom, track_top, track_bottom = found
-        thumb_h = thumb_bottom - thumb_top
-        drag_px = max(1, int(thumb_h * fraction))
-        target_y = min(
-            (thumb_top + thumb_bottom) // 2 + drag_px,
-            track_bottom - thumb_h // 2 - 1,
-        )
-        if target_y <= (thumb_top + thumb_bottom) // 2 + 2:
-            return  # too close to bottom
-
-        pyautogui.moveTo(sb_cx, (thumb_top + thumb_bottom) // 2)
-        pyautogui.mouseDown()
-        time.sleep(0.15)
-        pyautogui.moveTo(sb_cx, target_y, duration=0.2)
-        time.sleep(0.1)
-        pyautogui.mouseUp()
-        time.sleep(0.5)
-
-    def scrollbar_drag_to_top(self, section: str, key: str):
-        """Drag scrollbar thumb to the very top of the track."""
-        found = self._find_scrollbar_thumb(section, key)
-        if not found:
-            return
-        sb_cx, thumb_top, thumb_bottom, track_top, _track_bottom = found
-        thumb_cy = (thumb_top + thumb_bottom) // 2
-        pyautogui.moveTo(sb_cx, thumb_cy)
-        pyautogui.mouseDown()
-        time.sleep(0.2)
-        pyautogui.moveTo(sb_cx, track_top + 3, duration=0.4)
-        pyautogui.mouseUp()
-        time.sleep(0.6)
