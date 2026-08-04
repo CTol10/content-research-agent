@@ -12,14 +12,19 @@ import re
 
 # ── Reply prefix patterns ────────────────────────────────────────────────
 
-# "回复 username :" or "回复 username用户：" (Xiaohongshu style)
+# "回复 username :" / "回复 username用户：" / "回复@username：" (Xiaohongshu/Weibo style)
 _REPLY_PREFIX = re.compile(
-    r'^回复\s+[^\s:：]+\s*[：:]\s*'
+    r'^回复\s*@?\s*[^\s:：]*\s*[：:]\s*'
 )
 
-# "回复 username" (no colon, Weibo style sometimes)
+# "回复 username" (no colon, Weibo style)
 _REPLY_PREFIX_NO_COLON = re.compile(
-    r'^回复\s+[^\s]+\s+'
+    r'^回复\s*@?\s*[^\s:]+\s+'
+)
+
+# "回复@username" right at start with no space (common in concatenated DOM)
+_REPLY_AT = re.compile(
+    r'^回复@[^\s:：]+\s*'
 )
 
 
@@ -61,8 +66,10 @@ _PUBLISH_LOCATION = re.compile(
 
 
 def strip_reply_prefix(text: str) -> str:
-    """Remove '回复 username :' / '回复 username用户：' prefix."""
+    """Remove '回复 username :' / '回复@username：' / '回复 username' prefix."""
     text = _REPLY_PREFIX.sub('', text).strip()
+    text = _REPLY_PREFIX_NO_COLON.sub('', text).strip()
+    text = _REPLY_AT.sub('', text).strip()
     return text
 
 

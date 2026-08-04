@@ -16,8 +16,8 @@ import pyautogui
 from PIL import Image, ImageChops, ImageStat
 
 import config
-from scrapers.wechat_window_manager import WechatWindowManager, WindowRect
-from scrapers.wechat_ocr import WechatOcr
+from scrapers.wechat.v411.window_manager import WechatWindowManager, WindowRect
+from scrapers.wechat.ocr import WechatOcr
 
 logger = logging.getLogger(__name__)
 

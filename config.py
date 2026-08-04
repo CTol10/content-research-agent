@@ -45,9 +45,10 @@ PLATFORM_PATTERNS: dict[str, list[str]] = {
     "douyin": ["iesdouyin.com", "douyin.com"],
     "xiaohongshu": ["xiaohongshu.com"],
     "wechat": ["mp.weixin.qq.com"],
-    "wechat_channels": ["channels.weixin.qq.com"],
+    "wechat_channels": ["channels.weixin.qq.com", "weixin.qq.com/sph"],
     "toutiao": ["toutiao.com"],
     "weibo": ["weibo.com"],
+    "bilibili": ["bilibili.com", "b23.tv"],
 }
 
 # OS detection
@@ -101,6 +102,10 @@ def _load_api_key(env_name: str, ini_name: str = "") -> str:
 MIMO_API_KEY = _load_api_key("MIMO_API_KEY")
 MIMO_BASE_URL = "https://api.xiaomimimo.com/v1"
 MIMO_MODEL = "mimo-v2.5"
+
+# 视频号在线解析（sph 分享链接 -> 元宝解析 -> finder-preview 下载视频，仅口播，不碰评论）
+# 元宝 cookie 不走 config.ini：由 `python main.py --login-yuanbao` 登录后存入
+# Playwright 持久化 profile (cookies/_yuanbao_profile)，解析时 headless 重开读取。
 
 # Video processing
 VIDEO_TEMP_DIR = OUTPUT_DIR / "video_temp"

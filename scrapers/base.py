@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import sys
 from pathlib import Path
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -319,14 +320,16 @@ class BaseScraper:
         print(f"  [{self.platform_name}] 浏览器已打开，请在浏览器中完成登录")
         print(f"  登录完成后，请回到此处按 Enter 键确认")
         print(f"{'='*50}")
+        sys.stdout.flush()
 
-        # Wait for user to press Enter in a separate thread to avoid blocking asyncio
+        # Read from stdin in a thread — input() can be unreliable across threads,
+        # so we use sys.stdin.readline() instead.
         import concurrent.futures
         loop = asyncio.get_event_loop()
         with concurrent.futures.ThreadPoolExecutor() as pool:
             try:
                 await asyncio.wait_for(
-                    loop.run_in_executor(pool, input),
+                    loop.run_in_executor(pool, sys.stdin.readline),
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:

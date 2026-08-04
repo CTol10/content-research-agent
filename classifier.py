@@ -64,9 +64,9 @@ TAG_PROMPT_RULES = """
 【情感判定的关键——区分"赞美 vs 描述"】
 正面情感的核心是「评价性表达」，即作者带有明确的赞许/喜爱语气；中性是「描述性表达」，即作者只是在陈述事实或风格但不带评价色彩。具体规则：
 1. **明确正面词 + 具体维度 → 正面**：例如"床很舒服"、"早餐好吃"、"装修好看"、"服务周到"、"环境真不错"。
-2. **明确赞许语气（无需具体维度）→ 正面**：例如"幸福感爆棚"、"细节有做的非常到位"、"惊艳"、"无可挑剔"、"很整洁"、"简约高级"。
+2. **明确赞许语气（无需具体维度）→ 正面**：例如"幸福感爆棚"、"细节有做的非常到位"、"惊艳"、"无可挑剔"、"很整洁"、"简约高级"。"高级"/"好高级"/"高级感"等涉及格调质感的表述，指向【美学设计】。
 3. **风格描述（无评价词）→ 中性**：例如"中式美学"、"禅意"、"侘寂风"、"宋氏美学"。
-4. **模糊短词（少于5字、无指向）→ 通常不标标签**：例如"舒适"、"美"、"高级"、"舒适感拉满"、"惬意"——这些词太模糊，无法判断指向哪个维度，应保持空标签。
+4. **模糊短词（少于5字、无指向）→ 通常不标标签**：例如"舒适"、"美"、"舒适感拉满"、"惬意"——这些词太模糊，无法判断指向哪个维度，应保持空标签。
 5. **感叹但非评价 → 中性或不标**：例如"太牛了"、"这家酒店也太智能了吧"——是对新奇事物的感叹，不是正面体验评价。
 
 【情感保守原则】
@@ -254,7 +254,7 @@ SYSTEM_PROMPT = f"""你是一个酒店行业内容分析专家。分析用户发
 输出：{{"tags": [], "has_comparison": "否"}}
 
 输入："高级"
-输出：{{"tags": [], "has_comparison": "否"}}
+输出：{{"tags": ["美学设计-正面"], "has_comparison": "否"}}
 
 输入："感觉这个酸奶碗好好吃"
 输出：{{"tags": [], "has_comparison": "否"}}
@@ -275,7 +275,7 @@ SYSTEM_PROMPT = f"""你是一个酒店行业内容分析专家。分析用户发
 4. 不过度标注原则：一条评论只标注评论内容明确涉及的标签，不做上下文推断。泛泛夸赞（"不错"、"很棒"）不标具体标签。
 5. 短评保守原则：对于短评（尤其是少于15字），必须包含明确指向酒店某个具体维度（如"早餐好吃"、"床舒服"、"房间大"）才能标注标签和正面情感。以下短评不标任何标签：
    - 纯感叹/感叹词："开心快乐"、"惊喜住了"、"惬意住了"、"太牛了"、"好的"
-   - 泛泛赞美无指向："好高级"、"好美"、"真的很不错"、"很舒服"（没说哪里高级/舒服）
+   - 泛泛赞美无指向："好美"、"真的很不错"、"很舒服"（没说哪里好/舒服）
    - 表达意愿/计划："下次就住这家"、"列入行程了"、"要列入行程了吗"
    - 与人互动："是哦就是要放松"、"你值得拥有"、"我也喜欢"
    - 回复他人且无实质评价内容："噶被你种草了"、"本来想骑着去西湖的"
@@ -463,7 +463,7 @@ def _classify_short_content_locally(text: str) -> dict:
     elif re.search(r"房间小|狭小|局促|拥挤", content):
         _append_unique_tag(tags, "客房面积", "负面")
 
-    if re.search(r"装修|好看|漂亮|大气|颜值|氛围|美|雅|治愈", content):
+    if re.search(r"装修|好看|漂亮|大气|颜值|氛围|美|雅|治愈|高级", content):
         sentiment = "负面" if re.search(r"丑|老旧|土", content) else "正面"
         _append_unique_tag(tags, "美学设计", sentiment)
 
@@ -548,7 +548,7 @@ SHORT_COMMENT_PROMPT = """你是一个酒店行业内容分析专家。当前分
 4. 不过度标注原则：一条评论只标注评论内容明确涉及的标签，不做上下文推断。泛泛夸赞（"不错"、"很棒"）不标具体标签。
 5. 短评保守原则：对于短评（尤其是少于15字），必须包含明确指向酒店某个具体维度（如"早餐好吃"、"床舒服"、"房间大"）才能标注标签和正面情感。以下短评不标任何标签：
    - 纯感叹/感叹词："开心快乐"、"惊喜住了"、"惬意住了"、"太牛了"、"好的"
-   - 泛泛赞美无指向："好高级"、"好美"、"真的很不错"、"很舒服"（没说哪里高级/舒服）
+   - 泛泛赞美无指向："好美"、"真的很不错"、"很舒服"（没说哪里好/舒服）
    - 表达意愿/计划："下次就住这家"、"列入行程了"
    - 与人互动："是哦就是要放松"、"你值得拥有"、"我也喜欢"
 6. 中性优先原则：当情感倾向不明显时，优先标"中性"而非"正面"。只有当内容明确包含正面评价词且指向具体维度时才标正面。
@@ -574,8 +574,8 @@ SHORT_COMMENT_PROMPT = """你是一个酒店行业内容分析专家。当前分
 输入："床垫不是那种柔软的 硬度可 床品不厚重"  → {"tags": ["睡眠-中性"], "has_comparison": "否"}
 输入："一杯茶静坐细品"  → {"tags": ["茶饮-中性"], "has_comparison": "否"}
 输入："舒适"  → {"tags": [], "has_comparison": "否"}
-输入："高级"  → {"tags": [], "has_comparison": "否"}
-输入:"好高级"  → {"tags": [], "has_comparison": "否"}
+输入："高级"  → {"tags": ["美学设计-正面"], "has_comparison": "否"}
+输入:"好高级"  → {"tags": ["美学设计-正面"], "has_comparison": "否"}
 输入："舒适感拉满"  → {"tags": [], "has_comparison": "否"}
 输入："惬意住了"  → {"tags": [], "has_comparison": "否"}
 输入："惊喜住了"  → {"tags": [], "has_comparison": "否"}
@@ -594,6 +594,49 @@ def build_user_prompt(post_content: str) -> str:
     return f"请分析以下帖子内容：\n\n{post_content}"
 
 
+def _extract_json_object(text: str) -> str:
+    """从模型响应里抠第一个完整 JSON 对象，容忍 markdown 围栏和尾部多余文本。
+
+    MiMo 即便设了 response_format=json_object，偶尔仍返回 ```json 围栏
+    或在 JSON 后追加说明文字，导致 json.loads 报 "Extra data"。
+    """
+    text = (text or "").strip()
+    # 剥掉 markdown 代码围栏（```json ... ``` 或 ``` ... ```）
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    # 抠第一个平衡的 {...}，忽略其后多余文本（处理 "Extra data"）
+    start = text.find("{")
+    if start == -1:
+        return text  # 没有 {，交给 json.loads 报错
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+    return text  # 没找到闭合，原样交给 json.loads
+
+
 def parse_response(response_text: str) -> dict:
     """Parse the API response JSON into structured result.
 
@@ -604,15 +647,7 @@ def parse_response(response_text: str) -> dict:
     default_result = {"tags": [], "has_comparison": "否"}
 
     try:
-        # Try to extract JSON from the response
-        text = response_text.strip()
-        # Handle markdown code blocks
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-
+        text = _extract_json_object(response_text)
         result = json.loads(text)
 
         # Validate structure
@@ -636,17 +671,17 @@ def parse_response(response_text: str) -> dict:
 
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.error(f"[classifier] Failed to parse response: {e}")
+        logger.warning(f"[classifier] raw response (first 300): {response_text[:300]!r}")
         return default_result
 
 
-def classify_content(post_content: str, retries: int = 2, is_post_content: bool = False) -> dict:
+def classify_content(post_content: str, retries: int = 0, is_post_content: bool = False) -> dict:
     """Classify post content using MiMo-v2.5 API.
 
     Args:
         post_content: The post text to classify.
-        retries: Number of retries on empty/failed response. Defaults to 2.
-            For long post content, a higher value (3) is used automatically
-            since the API is less stable on long inputs.
+        retries: Number of retries on empty/failed response. Defaults to 0
+            (no retry — fails fast to fallback).
         is_post_content: True if the content is a long-form post (正文).
 
     Returns:
@@ -679,10 +714,7 @@ def classify_content(post_content: str, retries: int = 2, is_post_content: bool 
         api_content = content[:2000]
         logger.info(f"[classifier] Truncated long post {len(content)} -> 2000 chars")
 
-    # Long post content is less stable on the API — bump retries and max_tokens
-    if is_post_content and retries < 3:
-        retries = 3
-    # Ensure enough output room for many tags on long posts
+    # Long post content — ensure enough output room for many tags
     max_tokens = 1024 if is_post_content else 500
 
     default_result = {"tags": [], "has_comparison": "否"}
@@ -705,7 +737,7 @@ def classify_content(post_content: str, retries: int = 2, is_post_content: bool 
                     "max_tokens": max_tokens,
                     "response_format": {"type": "json_object"},
                 },
-                timeout=30,
+                timeout=10,
             )
             response.raise_for_status()
 

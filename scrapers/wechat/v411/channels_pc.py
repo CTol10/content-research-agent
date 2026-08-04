@@ -12,7 +12,7 @@ import time
 import pyautogui
 
 import config
-from scrapers.wechat_pc_base import WechatPcBaseScraper
+from scrapers.wechat.v411.base import WechatPcBaseScraper
 
 logger = logging.getLogger(__name__)
 
@@ -550,7 +550,7 @@ class WechatChannelsPcScraper(WechatPcBaseScraper):
         Also finds and clicks "展开"/"x条回复" buttons before each OCR
         pass, to expand nested replies.
         """
-        from scrapers.wechat_ocr import merge_comment_fragments
+        from scrapers.wechat.ocr import merge_comment_fragments
 
         raw: list[tuple[str, str]] = []
         no_change_count = 0
@@ -566,6 +566,12 @@ class WechatChannelsPcScraper(WechatPcBaseScraper):
         # events reach the panel rather than the video / background.
         pyautogui.moveTo(cx, cy, duration=0.1)
         time.sleep(0.2)
+
+        # Click top-right corner to focus the comment panel (safe from links/images)
+        focus_x = region_left + region_w - 10
+        focus_y = region_top + 10
+        pyautogui.click(focus_x, focus_y)
+        time.sleep(0.3)
 
         # Measure actual px/click from the live panel (falls back to 25)
         px_per_click = self._measure_px_per_click(
@@ -599,6 +605,8 @@ class WechatChannelsPcScraper(WechatPcBaseScraper):
                     time.sleep(0.3)
                 total_expanded += len(buttons)
                 time.sleep(0.8)  # wait for expansion animation
+                # Expanding adds new content, reset stale counter
+                no_change_count = 0
 
             # Screenshot & OCR the comment panel region
             batch = self.ocr_region(
@@ -609,8 +617,8 @@ class WechatChannelsPcScraper(WechatPcBaseScraper):
             # Check if new comments appeared
             if len(batch) == 0:
                 no_change_count += 1
-                if no_change_count >= 3:
-                    logger.debug("[wechat_channels] No new comments after 3 scrolls")
+                if no_change_count >= 5:
+                    logger.debug("[wechat_channels] No new comments after 5 scrolls")
                     break
             else:
                 no_change_count = 0

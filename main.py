@@ -250,6 +250,22 @@ def read_input_excel(filepath) -> list[dict]:
     return rows
 
 
+def _resolve_config_path(filename: str) -> Path | None:
+    """Resolve a config file path — checks exe directory first, then CWD.
+
+    scraper 实际按 config.BASE_DIR（exe 同目录）读取；这里保持同序，
+    避免 CWD≠exe 目录时误判配置缺失（例如从其他目录调起 exe）。
+    """
+    import config
+    base_path = config.BASE_DIR / filename
+    if base_path.exists():
+        return base_path
+    cwd_path = Path(filename)
+    if cwd_path.exists():
+        return cwd_path
+    return None
+
+
 def _ensure_wechat_config(requested_platforms: set):
     """Auto-check WeChat PC calibration config. Prompt to calibrate if missing."""
     wechat_keys = {"wechat", "wechat_channels"}
@@ -258,14 +274,43 @@ def _ensure_wechat_config(requested_platforms: set):
     if requested_platforms and not (requested_platforms & wechat_keys):
         return
 
-    from pathlib import Path as _Path
-    config_path = _Path("config.wechat_pc.json")
-    if not config_path.exists():
+    from scrapers.wechat import detect_version
+    version = detect_version()
+
+    if version == "4.1.7":
+        config_filename = "config.wechat_pc_417.json"
+        alt_config_filename = "config.wechat_pc.json"
+        calibrator_module = "scrapers.wechat.v417.calibrator"
+        calibrator_cls = "WechatCalibratorV417"
+        alt_version = "4.1.11"
+    else:
+        config_filename = "config.wechat_pc.json"
+        alt_config_filename = "config.wechat_pc_417.json"
+        calibrator_module = "scrapers.wechat_calibrator"
+        calibrator_cls = "WechatCalibrator"
+        alt_version = "4.1.7"
+
+    config_path = _resolve_config_path(config_filename)
+
+    # If the detected version's config doesn't exist, try the other version's config
+    if config_path is None:
+        config_path = _resolve_config_path(alt_config_filename)
+        if config_path is not None:
+            logger.info("检测到 %s 配置文件，切换为 %s 配置", alt_config_filename, alt_version)
+            if alt_version == "4.1.7":
+                calibrator_module = "scrapers.wechat.v417.calibrator"
+                calibrator_cls = "WechatCalibratorV417"
+            else:
+                calibrator_module = "scrapers.wechat_calibrator"
+                calibrator_cls = "WechatCalibrator"
+            version = alt_version
+
+    if config_path is None:
         print("\n" + "=" * 60)
-        print("  检测到需要微信公众号/视频号功能，但未找到坐标配置文件。")
+        print(f"  检测到需要微信公众号/视频号功能（WeChat {version}），但未找到坐标配置文件。")
         print("  需要先校准微信窗口中的 UI 元素位置。")
         print("=" * 60)
-        _offer_calibration()
+        _offer_calibration_v2(version, calibrator_module, calibrator_cls)
         return
 
     try:
@@ -275,36 +320,85 @@ def _ensure_wechat_config(requested_platforms: set):
         profile = data.get("profiles", {}).get(profile_name, {})
         if not profile or "wechat_main" not in profile:
             print("\n" + "=" * 60)
-            print("  微信坐标配置不完整，需要重新校准。")
+            print(f"  微信坐标配置不完整（WeChat {version}），需要重新校准。")
             print("=" * 60)
-            _offer_calibration()
+            _offer_calibration_v2(version, calibrator_module, calibrator_cls)
     except Exception:
         print("\n" + "=" * 60)
-        print("  微信坐标配置文件损坏，需要重新校准。")
+        print(f"  微信坐标配置文件损坏（WeChat {version}），需要重新校准。")
         print("=" * 60)
-        _offer_calibration()
+        _offer_calibration_v2(version, calibrator_module, calibrator_cls)
 
 
-def _offer_calibration():
-    """Offer to run WeChat calibration interactively."""
+def _offer_calibration_v2(version: str, module_name: str, class_name: str):
+    """Offer to run version-appropriate WeChat calibration."""
+    print(f"  检测到 WeChat {version}，将使用对应版本的校准工具。")
     print("  请确保微信 PC 客户端已启动并登录。")
     print()
     try:
         answer = input("  是否现在开始校准？[Y/n] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
-        print("\n  已取消。请稍后手动运行: 评论抓取工具.exe --wechat-calibrate")
+        print("\n  已取消。请稍后手动运行校准工具。")
         sys.exit(1)
     if answer and answer not in ("y", "yes", ""):
-        print("  已跳过校准。请稍后手动运行: 评论抓取工具.exe --wechat-calibrate")
+        print("  已跳过校准。请稍后手动运行校准工具。")
         sys.exit(1)
     print()
-    from scrapers.wechat_calibrator import WechatCalibrator
-    calibrator = WechatCalibrator()
+    import importlib
+    mod = importlib.import_module(module_name)
+    calibrator_cls = getattr(mod, class_name)
+    calibrator = calibrator_cls()
     ok = calibrator.calibrate_all()
     if not ok:
         print("\n  校准未完成，无法继续。")
         sys.exit(1)
     print("\n  校准完成，继续抓取流程...\n")
+
+
+def run_wechat_calibration(use_overlay: bool = True) -> bool:
+    """Run version-appropriate WeChat PC coordinate calibration."""
+    from scrapers.wechat import detect_version
+    version = detect_version()
+    if version == "4.1.7":
+        from scrapers.wechat.v417.calibrator import WechatCalibratorV417
+        calibrator = WechatCalibratorV417(use_overlay=use_overlay)
+    else:
+        from scrapers.wechat_calibrator import WechatCalibrator
+        calibrator = WechatCalibrator(use_overlay=use_overlay)
+    return bool(calibrator.calibrate_all())
+
+
+def _show_startup_menu(args) -> bool:
+    """裸运行（无动作参数）启动菜单：抓取 / 校准 / 退出。
+
+    Returns True 表示继续抓取，False 表示退出。
+    """
+    while True:
+        print()
+        print("=" * 60)
+        print("  请选择操作：")
+        print("    [1] 开始抓取")
+        print("    [2] 校准微信坐标（内置默认坐标不匹配时使用）")
+        print("    [3] 退出")
+        print("=" * 60)
+        try:
+            choice = input("  请选择 [1/2/3]（默认 1）: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  已退出。")
+            return False
+        if choice in ("", "1"):
+            return True
+        if choice == "2":
+            ok = run_wechat_calibration(use_overlay=not args.no_overlay)
+            if ok:
+                print("\n  校准完成。可重新选择开始抓取。\n")
+            else:
+                print("\n  校准未完成，可重试或退出。\n")
+            continue
+        if choice == "3":
+            print("  再见！")
+            return False
+        print("  无效输入，请重新选择。")
 
 
 _PLATFORM_DISPLAY = {
@@ -314,6 +408,7 @@ _PLATFORM_DISPLAY = {
     "toutiao": "今日头条",
     "wechat": "微信公众号",
     "wechat_channels": "微信视频号",
+    "bilibili": "哔哩哔哩",
 }
 
 
@@ -363,8 +458,13 @@ CDP_PLATFORMS = set()
 
 def check_cookies(platform_keys: list[str]) -> list[str]:
     import config
+    # WeChat platforms use desktop automation, not browser cookies.
+    # A separate WeChat window check runs before scraping.
+    _WECHAT_PLATFORMS = {"wechat", "wechat_channels"}
     missing = []
     for key in platform_keys:
+        if key in _WECHAT_PLATFORMS:
+            continue
         # Check if cookie file exists OR persistent browser profile exists
         cookie_path = config.COOKIE_DIR / f"{key}.json"
         browser_profile = config.COOKIE_DIR / "_browser_profile"
@@ -378,19 +478,21 @@ async def login_platform(platform_key: str, wait_seconds: int = 300):
     from scrapers.xiaohongshu import XiaohongshuScraper
     from scrapers.weibo import WeiboScraper
     from scrapers.toutiao import ToutiaoScraper
+    from scrapers.bilibili import BilibiliScraper
 
     scraper_map = {
         "douyin": DouyinScraper,
         "xiaohongshu": XiaohongshuScraper,
         "weibo": WeiboScraper,
         "toutiao": ToutiaoScraper,
+        "bilibili": BilibiliScraper,
     }
     scraper_cls = scraper_map.get(platform_key)
     if not scraper_cls:
         print(f"[错误] 未知平台: {platform_key}，支持的平台: {', '.join(scraper_map.keys())}")
         return
     scraper = scraper_cls()
-    await scraper.login_interactive(wait_seconds=wait_seconds)
+    await scraper.wait_for_login(timeout=wait_seconds)
 
 
 async def login_open_all(platform_keys: list[str]):
@@ -399,12 +501,14 @@ async def login_open_all(platform_keys: list[str]):
     from scrapers.xiaohongshu import XiaohongshuScraper
     from scrapers.weibo import WeiboScraper
     from scrapers.toutiao import ToutiaoScraper
+    from scrapers.bilibili import BilibiliScraper
 
     scraper_map = {
         "douyin": DouyinScraper,
         "xiaohongshu": XiaohongshuScraper,
         "weibo": WeiboScraper,
         "toutiao": ToutiaoScraper,
+        "bilibili": BilibiliScraper,
     }
 
     missing = check_cookies(platform_keys)
@@ -477,23 +581,24 @@ def classify_error(error_str: str) -> str:
 
 
 async def run_all(input_file, platforms_filter=None, resume=False, batch_size=0,
-                  login_timeout=300, classify=True, process_video=True):
+                  login_timeout=300, classify=True, process_video=True, headless=False):
     """Full pipeline: check cookies → auto-login if needed → scrape."""
     import config
     from scrapers.douyin import DouyinScraper
     from scrapers.xiaohongshu import XiaohongshuScraper
-    from scrapers.wechat_official_pc import WechatOfficialPcScraper
-    from scrapers.wechat_channels_pc import WechatChannelsPcScraper
+    from scrapers.wechat import get_official_scraper, get_channels_scraper
     from scrapers.weibo import WeiboScraper
     from scrapers.toutiao import ToutiaoScraper
+    from scrapers.bilibili import BilibiliScraper
 
     scraper_classes = {
         "douyin": DouyinScraper,
         "xiaohongshu": XiaohongshuScraper,
-        "wechat": WechatOfficialPcScraper,
-        "wechat_channels": WechatChannelsPcScraper,
+        "wechat": lambda: get_official_scraper(),
+        "wechat_channels": lambda: get_channels_scraper(),
         "weibo": WeiboScraper,
         "toutiao": ToutiaoScraper,
+        "bilibili": BilibiliScraper,
     }
 
     rows = read_input_excel(input_file)
@@ -537,27 +642,28 @@ async def run_all(input_file, platforms_filter=None, resume=False, batch_size=0,
     print(f"\n开始抓取...\n")
     return await scrape_all(input_file, platforms_filter, resume=resume,
                             batch_size=batch_size, classify=classify,
-                            process_video=process_video)
+                            process_video=process_video, headless=headless)
 
 
 async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size=0,
-                     classify=True, process_video=True):
+                     classify=True, process_video=True, headless=False):
     import json as _json
     import config
     from scrapers.douyin import DouyinScraper
     from scrapers.xiaohongshu import XiaohongshuScraper
-    from scrapers.wechat_official_pc import WechatOfficialPcScraper
-    from scrapers.wechat_channels_pc import WechatChannelsPcScraper
+    from scrapers.wechat import get_official_scraper, get_channels_scraper
     from scrapers.toutiao import ToutiaoScraper
     from scrapers.weibo import WeiboScraper
+    from scrapers.bilibili import BilibiliScraper
 
     scraper_classes = {
         "douyin": DouyinScraper,
         "xiaohongshu": XiaohongshuScraper,
-        "wechat": WechatOfficialPcScraper,
-        "wechat_channels": WechatChannelsPcScraper,
+        "wechat": lambda: get_official_scraper(),
+        "wechat_channels": lambda: get_channels_scraper(),
         "toutiao": ToutiaoScraper,
         "weibo": WeiboScraper,
+        "bilibili": BilibiliScraper,
     }
 
     rows = read_input_excel(input_file)
@@ -647,6 +753,61 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
             print(f"\n[警告] 以下平台仍未登录: {', '.join(still_missing)}")
             print("这些平台的链接将被跳过。")
 
+    # ── WeChat window check ──────────────────────────────────────
+    wechat_needed = [p for p in needed_platforms if p in ("wechat", "wechat_channels")]
+    if wechat_needed:
+        if headless:
+            print("\n" + "=" * 60)
+            print("  [提示] 无头模式下不支持微信平台（需要 PC 客户端窗口）。")
+            print(f"  将跳过微信相关链接: {', '.join(wechat_needed)}")
+            print("=" * 60)
+            rows = [r for r in rows if r["platform_key"] not in ("wechat", "wechat_channels")]
+            if not rows:
+                print("没有可抓取的非微信链接，退出。")
+                return
+        else:
+            from scrapers.wechat import detect_version
+            version = detect_version()
+            if version == "4.1.7":
+                from scrapers.wechat.v417.window_manager import WechatWindowManagerV417
+                wm = WechatWindowManagerV417()
+                window_found = wm.find_main()
+            else:
+                from scrapers.wechat_window_manager import WechatWindowManager
+                wm = WechatWindowManager()
+                window_found = wm.find_window()
+            if not window_found:
+                print("\n" + "=" * 60)
+                print("  [提示] 检测到需要抓取微信平台，但微信窗口未打开。")
+                print("  请打开微信 PC 客户端并登录，然后按 Enter 继续...")
+                print("  （如果不需要抓取微信，可以按 Ctrl+C 退出，")
+                print("   下次运行时使用 --platforms 参数排除微信平台）")
+                print("=" * 60)
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n用户取消。")
+                    return
+
+            # ── 元宝登录态检查（视频号口播在线解析所需）──
+            # 直接跑抓取（--run）时若缺 _yuanbao_profile，提示扫码登录，不必单独 --login。
+            if "wechat_channels" in needed_platforms:
+                from scrapers.wechat.channels_sph_parser import ChannelsSphParser
+                yuanbao_profile = config.COOKIE_DIR / "_yuanbao_profile"
+                if not yuanbao_profile.exists():
+                    print("\n" + "=" * 56)
+                    print("  视频号口播在线解析需要腾讯元宝登录态")
+                    print("  未检测到 cookies/_yuanbao_profile，现在扫码登录？[Y/n]")
+                    print("=" * 56)
+                    try:
+                        _yb_ans = input().strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        _yb_ans = ""
+                    if _yb_ans in ("", "y", "yes"):
+                        await ChannelsSphParser.login_interactive(wait_seconds=300)
+                    else:
+                        print("  跳过——视频号口播将为空（之后可用 --login 单独登录元宝）。")
+
     results = []
     success_count = 0
     fail_count = 0
@@ -687,7 +848,9 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
 
         scraper = scraper_cls()
         try:
-            await scraper.start()
+            is_wechat_p = platform_key in ("wechat", "wechat_channels")
+            start_kwargs = {} if is_wechat_p else {"headless": headless}
+            await scraper.start(**start_kwargs)
         except Exception as e:
             is_wechat = platform_key in ("wechat", "wechat_channels")
             if is_wechat:
@@ -729,10 +892,17 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
                     platform_name = _PLATFORM_DISPLAY.get(platform_key, platform_key)
 
                     # Write comments to Excel (one row per tag)
+                    written_in_url = 0
+                    dropped_in_url = 0
                     for ci, (_, content) in enumerate(comments):
                         # Clean comment content: strip reply prefix, metadata, etc.
+                        raw_repr = repr(content)[:80] if content is not None else "None"
                         cleaned_content = clean_comment_content(content, platform=platform_key)
                         if not cleaned_content:
+                            dropped_in_url += 1
+                            logger.warning(
+                                f"[{platform_key}] 评论被清洗丢弃 ci={ci+1}/{len(comments)} raw={raw_repr}"
+                            )
                             continue  # skip empty/meaningless comments after cleaning
 
                         expanded = []
@@ -750,6 +920,13 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
                         else:
                             ws_comments.append([comment_counter, "中性", "/", "否", cleaned_content, platform_name])
                         comment_counter += 1
+                        written_in_url += 1
+
+                    if len(comments):
+                        logger.info(
+                            f"[{platform_key}] 评论写入统计: raw={len(comments)} "
+                            f"written={written_in_url} dropped={dropped_in_url}"
+                        )
 
                     # Video processing
                     video_result = None
@@ -776,26 +953,35 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
                             print("跳过")
 
                     # Determine content display for Sheet 3
+                    # transcription 来源：抖音走 video_processor；
+                    # 视频号由 scrape() 经 parse_narration 自带 result["narration"]
+                    # （OCR 评论后在线解析，替代录屏）
+                    transcription = ""
+                    video_summary = ""
                     if video_result and video_result["status"] in ("success", "no_analysis", "analysis_failed"):
                         transcription = video_result.get("transcription", "")
-                        parts = []
-                        if post_content:
-                            parts.append(f"正文：{post_content}")
-                        if transcription:
-                            parts.append(f"口播：{transcription}")
-                        if parts:
-                            content_display = "\n".join(parts)
-                        else:
-                            content_display = f"{video_result['label']}\n\n{video_result['summary']}"
-                        # Use transcription for tagging if available, fallback to summary/post
-                        if transcription:
-                            classify_text = transcription
-                        elif video_result["status"] == "success":
-                            classify_text = video_result["summary"]
-                        else:
-                            classify_text = post_content
+                        video_summary = video_result.get("summary", "")
+                    if not transcription and result.get("narration"):
+                        transcription = result["narration"]
+
+                    parts = []
+                    if post_content:
+                        parts.append(f"正文：{post_content}")
+                    if transcription:
+                        parts.append(f"口播：{transcription}")
+                    if parts:
+                        content_display = "\n".join(parts)
+                    elif video_result:
+                        content_display = f"{video_result['label']}\n\n{video_summary}"
                     else:
-                        content_display = post_content
+                        content_display = ""
+
+                    # Use transcription for tagging if available, fallback to summary/post
+                    if transcription:
+                        classify_text = transcription
+                    elif video_result and video_result["status"] == "success":
+                        classify_text = video_summary
+                    else:
                         classify_text = post_content
 
                     # Write post content to Excel (one row per tag)
@@ -859,7 +1045,9 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
                         logger.info(f"[{platform_key}] Restarting browser context...")
                         try:
                             await scraper.stop()
-                            await scraper.start()
+                            _is_wx = platform_key in ("wechat", "wechat_channels")
+                            _skw = {} if _is_wx else {"headless": headless}
+                            await scraper.start(**_skw)
                         except Exception as re:
                             logger.error(f"[{platform_key}] Failed to restart: {re}")
 
@@ -947,6 +1135,9 @@ def main():
     parser.add_argument("--login", action="store_true", help="交互式登录各平台并保存Cookie")
     parser.add_argument("--login-open", action="store_true", help="打开登录浏览器（不阻塞，登录后需运行 --login-save）")
     parser.add_argument("--login-save", action="store_true", help="保存已打开浏览器的Cookie")
+    parser.add_argument("--login-yuanbao", action="store_true",
+                        help="单独登录腾讯元宝（视频号口播在线解析所需 cookie，存入 cookies/_yuanbao_profile）。"
+                             "注：--login（全平台）已自动包含元宝登录，无需单独跑")
     parser.add_argument("--platforms", default="", help="指定平台(逗号分隔): douyin,xiaohongshu,weibo,toutiao")
     parser.add_argument("--input", default="", help="输入Excel文件路径")
     parser.add_argument("--resume", action="store_true", help="从上次中断处继续抓取（跳过已完成的URL）")
@@ -958,6 +1149,10 @@ def main():
                         help="微信操作模式: pc(桌面相对坐标,默认) browser(浏览器) auto(自动选择)")
     parser.add_argument("--wechat-calibrate", action="store_true",
                         help="校准微信PC桌面坐标（交互式点击记录UI元素位置）")
+    parser.add_argument("--no-overlay", action="store_true",
+                        help="校准时不显示屏幕叠加层（纯文字模式）")
+    parser.add_argument("--headless", action="store_true",
+                        help="无头模式运行浏览器（非微信平台适用）")
     args = parser.parse_args()
 
     if not args.setup:
@@ -981,15 +1176,19 @@ def main():
     config.COOKIE_DIR.mkdir(parents=True, exist_ok=True)
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # 落地内置默认微信坐标配置（冻结运行时首次启动自动写入 exe 同目录）。
+    # 必须在版本推断 / 校准检查之前调用，保证 detect_version() 与
+    # _ensure_wechat_config() 能看到落地后的默认配置。
+    from scrapers.wechat import ensure_default_wechat_config
+    ensure_default_wechat_config()
+
     # Handle --wechat-calibrate (before any run/login flow)
     if args.wechat_calibrate:
-        from scrapers.wechat_calibrator import WechatCalibrator
-        calibrator = WechatCalibrator()
-        ok = calibrator.calibrate_all()
+        ok = run_wechat_calibration(use_overlay=not args.no_overlay)
         sys.exit(0 if ok else 1)
 
     # Pre-check: if WeChat platforms are requested, ensure calibration exists
-    if args.run or not args.login_open and not args.login_save and not args.login:
+    if args.run or not args.login_open and not args.login_save and not args.login and not args.login_yuanbao:
         # Determine which platforms will be used
         if args.platforms:
             requested = set(p.strip() for p in args.platforms.split(",") if p.strip())
@@ -1006,13 +1205,21 @@ def main():
             print("  配置方法: 编辑同目录下的 config.ini 文件")
         print()
 
+    # 裸运行（无动作参数）：显示启动菜单，提供抓取/校准/退出入口。
+    # 放在输入文件检查之前，保证没有输入 Excel 时也能进入校准模式。
+    bare_run = not (args.run or args.login or args.login_open or
+                    args.login_save or args.login_yuanbao)
+    if bare_run:
+        if not _show_startup_menu(args):
+            sys.exit(0)
+
     input_file = args.input if args.input else str(config.INPUT_FILE)
     if not Path(input_file).exists():
         print(f"[错误] 找不到输入文件: {input_file}")
         print(f"请将 .xlsx 文件放到 input/ 目录下")
         sys.exit(1)
 
-    all_platforms = ["douyin", "xiaohongshu", "weibo", "toutiao"]
+    all_platforms = ["douyin", "xiaohongshu", "weibo", "toutiao", "bilibili"]
 
     if args.run:
         platforms_filter = None
@@ -1020,7 +1227,8 @@ def main():
             platforms_filter = [p.strip() for p in args.platforms.split(",") if p.strip()]
         asyncio.run(run_all(input_file, platforms_filter, resume=args.resume,
                             batch_size=args.batch_size, login_timeout=args.login_timeout,
-                            classify=not args.no_classify, process_video=not args.no_video))
+                            classify=not args.no_classify, process_video=not args.no_video,
+                            headless=args.headless))
     elif args.login_open:
         if args.platforms:
             platform_list = [p.strip() for p in args.platforms.split(",") if p.strip()]
@@ -1035,13 +1243,31 @@ def main():
         else:
             platform_list = all_platforms
         asyncio.run(login_open_all(platform_list))
+        # 元宝登录与平台登录一并完成：视频号口播在线解析所需 cookie 存入
+        # cookies/_yuanbao_profile（持久化 profile，不走 config.ini）。
+        # 默认全平台、或 --platforms 含 wechat/wechat_channels 时触发。
+        _want_yuanbao = (not args.platforms) or any(
+            p in platform_list for p in ("wechat", "wechat_channels")
+        )
+        if _want_yuanbao:
+            from scrapers.wechat.channels_sph_parser import ChannelsSphParser
+            print("\n" + "=" * 56)
+            print("  接下来登录腾讯元宝（视频号口播在线解析所需）")
+            print("  扫码登录后自动检测并保存，或回终端按 Enter 确认")
+            print("=" * 56)
+            asyncio.run(ChannelsSphParser.login_interactive(wait_seconds=args.login_timeout))
+    elif args.login_yuanbao:
+        from scrapers.wechat.channels_sph_parser import ChannelsSphParser
+        ok = asyncio.run(ChannelsSphParser.login_interactive(wait_seconds=args.login_timeout))
+        sys.exit(0 if ok else 1)
     else:
+        # 裸运行到达这里：启动菜单已确认开始抓取
         platforms_filter = None
         if args.platforms:
             platforms_filter = [p.strip() for p in args.platforms.split(",") if p.strip()]
         asyncio.run(scrape_all(input_file, platforms_filter, resume=args.resume,
                                batch_size=args.batch_size, classify=not args.no_classify,
-                               process_video=not args.no_video))
+                               process_video=not args.no_video, headless=args.headless))
 
 
 if __name__ == "__main__":

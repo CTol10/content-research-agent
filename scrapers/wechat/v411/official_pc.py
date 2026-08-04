@@ -10,7 +10,7 @@ import time
 import pyautogui
 
 import config
-from scrapers.wechat_pc_base import WechatPcBaseScraper
+from scrapers.wechat.v411.base import WechatPcBaseScraper
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +262,7 @@ class WechatOfficialPcScraper(WechatPcBaseScraper):
         :func:`~scrapers.wechat_ocr.merge_comment_fragments` as a
         post-processing pass.
         """
-        from scrapers.wechat_ocr import merge_comment_fragments
+        from scrapers.wechat.ocr import merge_comment_fragments
 
         region_left, region_top, region_w, region_h = \
             self.resolve_region("official", "comment_region")

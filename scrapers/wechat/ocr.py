@@ -186,6 +186,56 @@ def parse_ocr_comments(lines: list[str]) -> list[tuple[str, str]]:
 # ── Cross-screen fragment splicing ────────────────────────────────
 
 _MIN_OVERLAP = 8  # minimum chars for tail↔head overlap to be spliced
+_MIN_SIMILAR_LCS = 12  # minimum LCS length for near-duplicate detection
+
+
+def _normalize_nickname(nick: str) -> str:
+    """Normalize OCR-variant nicknames for matching.
+
+    Removes whitespace and trailing garbage characters that OCR
+    often appends (e.g. ``㎡``, ``≤``, ``營``, ``@``, stray digits).
+    """
+    nick = nick.strip()
+    # Remove whitespace
+    nick = re.sub(r'\s+', '', nick)
+    # Strip trailing non-letter/non-Chinese garbage (OCR artifacts)
+    # Keep: Chinese chars (一-鿿), ASCII letter/digit, common punct
+    nick = re.sub(r'[^\w一-鿿㐀-䶿●•·、。，！？：；（）「」【】《》…～]+$', '', nick)
+    return nick
+
+
+def _content_lcs_ratio(a: str, b: str) -> float:
+    """Longest-common-subsequence ratio between two strings (0.0–1.0).
+
+    Used for fuzzy dedup of near-duplicate OCR readings.
+    """
+    if not a or not b:
+        return 0.0
+    # Simple greedy LCS (fast enough for comment-length strings)
+    m, n = len(a), len(b)
+    if m > n:
+        a, b = b, a
+        m, n = n, m
+    # Use two-row DP for memory efficiency
+    prev = [0] * (n + 1)
+    for i in range(1, m + 1):
+        curr = [0] * (n + 1)
+        for j in range(1, n + 1):
+            if a[i - 1] == b[j - 1]:
+                curr[j] = prev[j - 1] + 1
+            else:
+                curr[j] = max(prev[j], curr[j - 1])
+        prev = curr
+    return prev[n] / max(m, n)
+
+
+def _content_prefix_match(a: str, b: str) -> int:
+    """Return length of the longest common prefix between a and b."""
+    n = min(len(a), len(b))
+    for i in range(n):
+        if a[i] != b[i]:
+            return i
+    return n
 
 
 def _try_splice(a: str, b: str) -> str | None:
@@ -197,11 +247,11 @@ def _try_splice(a: str, b: str) -> str | None:
     (no meaningful overlap).
 
     Merging rules (in order):
-      1. a == b          → pure dedup
-      2. b starts with a → b is a superset (comment short enough to fit
-           both screens fully, later OCR is better)
-      3. a ends with b   → a already contains b
-      4. a's tail overlaps b's head (>={_MIN_OVERLAP} chars) → splice
+      1. a == b after stripping → pure dedup
+      2. b starts with a → b is a superset
+      3. a starts with b → a already contains b
+      4. High LCS ratio (>0.75) → take the longer one
+      5. a's tail overlaps b's head (>={_MIN_OVERLAP} chars) → splice
     """
     a, b = a.strip(), b.strip()
     if not a or not b:
@@ -210,8 +260,18 @@ def _try_splice(a: str, b: str) -> str | None:
         return a
     if b.startswith(a):
         return b
-    if a.endswith(b):
+    if a.startswith(b):
         return a
+
+    # Near-duplicate detection: same short content with minor OCR noise
+    if len(a) < 40 and len(b) < 40:
+        prefix = _content_prefix_match(a, b)
+        if prefix >= 6 and prefix >= min(len(a), len(b)) * 0.6:
+            return a if len(a) >= len(b) else b
+
+    # Near-duplicate for longer content
+    if _content_lcs_ratio(a, b) > 0.75:
+        return a if len(a) >= len(b) else b
 
     # Find the longest overlap: a's suffix == b's prefix
     max_check = min(len(a), len(b)) - 1
@@ -225,42 +285,64 @@ def _try_splice(a: str, b: str) -> str | None:
 def merge_comment_fragments(
     pairs: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
-    """Merge cross-screen fragments of the same comment.
+    """Merge cross-screen fragments + deduplicate near-duplicate comments.
 
-    Walks ``pairs`` in screen order.  For each (nickname, content),
-    looks back at the most-recently-appended entry with the same
-    nickname and tries to splice the new fragment into it via
-    :func:`_try_splice`.  Spliced entries replace the old one when the
-    result is longer; otherwise the fragment is appended as a genuinely
-    new comment.
+    Walks ``pairs`` in screen order, using nickname-normalized matching
+    to handle OCR nickname variations (trailing junk, spacing).
+
+    Pass 1: nickname-based splice (same as before, with normalized nicks).
+    Pass 2: content-based dedup — remove near-duplicates with very
+            similar content (LCS ratio > 0.75 or long common prefix).
     """
+    # ── Pass 1: nickname-based merge ──
     result: list[tuple[str, str]] = []
 
     for nick, content in pairs:
+        norm_nick = _normalize_nickname(nick)
         merged = False
-        # Scan result backwards — the most recent same-nickname entry
-        # is the one that may be a split fragment of the same comment
-        # (N's clipped tail is immediately before N+1's head in
-        # screen-order pairs).
         for j in range(len(result) - 1, -1, -1):
             rnick, rcontent = result[j]
-            if rnick != nick:
+            if _normalize_nickname(rnick) != norm_nick:
                 continue
             spliced = _try_splice(rcontent, content)
             if spliced is not None:
-                # Replace with spliced version only when it's longer;
-                # always mark as merged (skip append) when spliceable.
                 if len(spliced) > len(rcontent):
                     result[j] = (rnick, spliced)
                 merged = True
                 break
-            # Stop scanning once we find same-nickname — no need to
-            # look further back (that's an earlier distinct comment).
+            # Same nickname but different comment — stop scan
             break
         if not merged:
             result.append((nick, content))
 
-    return result
+    # ── Pass 2: content-based near-duplicate dedup ──
+    deduped: list[tuple[str, str]] = []
+    for nick, content in result:
+        is_dup = False
+        for j, (dnick, dcontent) in enumerate(deduped):
+            # Only check same or similar nicknames
+            if _normalize_nickname(nick) != _normalize_nickname(dnick):
+                continue
+            # Exact match → dup
+            if content.strip() == dcontent.strip():
+                is_dup = True
+                break
+            # Near-duplicate: one contains the other
+            if content in dcontent or dcontent in content:
+                if len(content) > len(dcontent):
+                    deduped[j] = (nick, content)
+                is_dup = True
+                break
+            # High LCS ratio → near-duplicate, keep longer
+            if _content_lcs_ratio(content, dcontent) > 0.75:
+                if len(content) > len(dcontent):
+                    deduped[j] = (nick, content)
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append((nick, content))
+
+    return deduped
 
 
 class WechatOcr:
