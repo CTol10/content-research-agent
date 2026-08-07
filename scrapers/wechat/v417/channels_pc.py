@@ -178,7 +178,7 @@ class WechatChannelsPcScraperV417(WechatPcBaseScraperV417):
             ffmpeg = get_ffmpeg_exe()
             result = subprocess.run(
                 [ffmpeg, "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=15, errors="replace",
             )
             output = result.stderr
         except Exception as e:

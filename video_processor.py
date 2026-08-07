@@ -368,7 +368,7 @@ class VideoProcessor:
                 audio_path,
                 "-y",
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, errors="replace")
             if result.returncode == 0 and os.path.exists(audio_path):
                 logger.info(f"Audio extracted (copy): {audio_path}")
                 return audio_path
@@ -384,7 +384,7 @@ class VideoProcessor:
                 audio_path,
                 "-y",
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, errors="replace")
             if result.returncode == 0 and os.path.exists(audio_path):
                 logger.info(f"Audio extracted (aac): {audio_path}")
                 return audio_path
@@ -480,7 +480,7 @@ class VideoProcessor:
                 merged_path,
                 "-y"
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, errors="replace")
 
             if result.returncode == 0 and os.path.exists(merged_path):
                 logger.info(f"Video and audio merged: {merged_path}")

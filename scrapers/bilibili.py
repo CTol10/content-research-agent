@@ -230,7 +230,7 @@ class BilibiliScraper(BaseScraper):
                 "-y",
             ]
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120
+                cmd, capture_output=True, text=True, timeout=120, errors="replace"
             )
             if result.returncode == 0 and os.path.exists(output_path):
                 logger.info(

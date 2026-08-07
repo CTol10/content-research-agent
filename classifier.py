@@ -736,8 +736,12 @@ def classify_content(post_content: str, retries: int = 0, is_post_content: bool 
                     "temperature": 0.1,
                     "max_tokens": max_tokens,
                     "response_format": {"type": "json_object"},
+                    # mimo-v2.5 是推理模型，默认把 token 全耗在 reasoning_content 上，
+                    # finish_reason=length 导致 content 为空（正文大面积标空根因）。
+                    # 本任务是结构化抽取，无需思考，显式关闭以稳定产出 JSON。
+                    "thinking": {"type": "disabled"},
                 },
-                timeout=10,
+                timeout=20,
             )
             response.raise_for_status()
 

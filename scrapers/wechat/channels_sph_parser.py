@@ -336,7 +336,7 @@ class ChannelsSphParser:
         ]
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=max_duration + 30,
+                cmd, capture_output=True, text=True, timeout=max_duration + 30, errors="replace",
             )
         except subprocess.TimeoutExpired:
             logger.warning(f"[channels_sph] ffmpeg 提音频超时（>{max_duration+30}s）")

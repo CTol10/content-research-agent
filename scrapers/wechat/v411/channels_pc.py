@@ -167,7 +167,7 @@ class WechatChannelsPcScraper(WechatPcBaseScraper):
             ffmpeg = get_ffmpeg_exe()
             result = subprocess.run(
                 [ffmpeg, "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=15, errors="replace",
             )
             # ffmpeg writes device list to stderr
             output = result.stderr

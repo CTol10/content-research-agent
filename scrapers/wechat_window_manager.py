@@ -166,7 +166,7 @@ class WechatWindowManager:
                 ["powershell", "-Command",
                  "Get-Process WeChat,Weixin -ErrorAction SilentlyContinue "
                  "| Select-Object -ExpandProperty Id"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, errors="replace",
             )
             pids = set()
             for line in result.stdout.strip().splitlines():
