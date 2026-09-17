@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from urllib.parse import urlparse
+import time
+from urllib.parse import parse_qs, urlparse
 
 import config
 from scrapers.base import BaseScraper
@@ -9,10 +10,268 @@ logger = logging.getLogger(__name__)
 
 SCROLL_CONTAINER = 'main.ICt0G60V'
 
+# 抖音评论接口（主楼列表 / 回复列表）
+COMMENT_API_MARK = "/aweme/v1/web/comment/list"
+
 
 class NoCommentsError(Exception):
     """Raised when a video has no comments."""
-    pass
+
+
+class DouyinCommentApiCollector:
+    """采集抖音评论接口返回的评论。
+
+    抖音网页版把评论全部放在两个接口里：
+      - /aweme/v1/web/comment/list/        主楼评论（cursor 分页）
+      - /aweme/v1/web/comment/list/reply/  某条评论的回复（comment_id + cursor 分页）
+
+    直接读接口 JSON 比从 DOM 抽文本更可靠：不受虚拟列表回收、行数折叠
+    (-webkit-line-clamp)、昵称/正文混淆类名等影响，还能拿到回复归属关系。
+    """
+
+    def __init__(self):
+        self.nodes: dict[str, dict] = {}          # cid -> {nickname, text}
+        self.children: dict[str, list[str]] = {}  # parent_cid -> [child_cid, ...]
+        self.top_order: list[str] = []            # 主楼出现顺序
+        self.reply_totals: dict[str, int] = {}    # 主楼 cid -> 官方回复总数
+        self.pending_threads: set[str] = set()    # 官方还有下一页但没拉完的线程
+        self.page_count = 0
+        self.pending_requests = 0
+        self.api_urls: dict[str, str] = {}        # "list"/"reply" -> 页面自己发出的接口 URL
+
+    @staticmethod
+    def _parse_comment(raw: dict) -> tuple[str, str, str, int]:
+        cid = str(raw.get("cid") or "")
+        user = raw.get("user") or {}
+        nickname = (user.get("nickname") or "").strip()
+        text = (raw.get("text") or "").strip()
+        total = int(raw.get("reply_comment_total") or 0)
+        return cid, nickname, text, total
+
+    def note_request(self, url: str) -> None:
+        if COMMENT_API_MARK not in url:
+            return
+        self.pending_requests += 1
+        # 记下页面自己发出的接口 URL 作为"模板"：里面带着 a_bogus / msToken 等签名，
+        # 后续只改 cursor / count / comment_id 复刻请求，服务端依然认（已实测）。
+        key = "reply" if "/reply" in url else "list"
+        self.api_urls.setdefault(key, url)
+
+    def absorb_top(self, items: list[dict]) -> None:
+        """吸收一条接口返回的主楼列表。"""
+        for raw in items:
+            cid = str(raw.get("cid") or "")
+            if not cid:
+                continue
+            self.nodes.setdefault(cid, {
+                "nickname": raw.get("nick") or "",
+                "text": raw.get("text") or "",
+            })
+            if cid not in self.top_order:
+                self.top_order.append(cid)
+            total = int(raw.get("replies") or 0)
+            if total:
+                self.reply_totals[cid] = total
+
+    def absorb_replies(self, parent_cid: str, items: list[dict], has_more: bool) -> None:
+        """吸收一条接口返回的回复列表。"""
+        bucket = self.children.setdefault(parent_cid, [])
+        for raw in items:
+            cid = str(raw.get("cid") or "")
+            if not cid:
+                continue
+            self.nodes.setdefault(cid, {
+                "nickname": raw.get("nick") or "",
+                "text": raw.get("text") or "",
+            })
+            if cid not in bucket:
+                bucket.append(cid)
+        if has_more:
+            self.pending_threads.add(parent_cid)
+        else:
+            self.pending_threads.discard(parent_cid)
+
+    async def add_response(self, response) -> None:
+        try:
+            data = await response.json()
+        except Exception:
+            data = None
+        finally:
+            self.pending_requests = max(0, self.pending_requests - 1)
+
+        if not isinstance(data, dict):
+            return
+
+        url = response.url
+        is_reply = "/reply" in url
+        parent_cid = ""
+        if is_reply:
+            query = parse_qs(urlparse(url).query)
+            parent_cid = (query.get("comment_id") or [""])[0]
+
+        comments = data.get("comments") or []
+        has_more = bool(data.get("has_more"))
+        self.page_count += 1
+
+        for raw in comments:
+            if not isinstance(raw, dict):
+                continue
+            cid, nickname, text, total = self._parse_comment(raw)
+            if not cid:
+                continue
+            self.nodes.setdefault(cid, {"nickname": nickname, "text": text})
+            if not is_reply:
+                if cid not in self.top_order:
+                    self.top_order.append(cid)
+                if total:
+                    self.reply_totals[cid] = total
+            elif parent_cid:
+                bucket = self.children.setdefault(parent_cid, [])
+                if cid not in bucket:
+                    bucket.append(cid)
+
+        if is_reply and parent_cid:
+            if has_more:
+                self.pending_threads.add(parent_cid)
+            else:
+                self.pending_threads.discard(parent_cid)
+
+    def to_comments(self) -> list[tuple[str, str]]:
+        """按「主楼 -> 其回复 -> 回复的回复」层级顺序展开为 (昵称, 正文)。"""
+        out: list[tuple[str, str]] = []
+        emitted: set[str] = set()
+
+        def walk(cid: str):
+            if cid in emitted:
+                return
+            emitted.add(cid)
+            node = self.nodes.get(cid)
+            if node and (node["nickname"] or node["text"]):
+                out.append((node["nickname"], node["text"]))
+            for child in self.children.get(cid, []):
+                walk(child)
+
+        for cid in self.top_order:
+            walk(cid)
+        # 兜底：起点不在主楼里的（例如被折叠的一级回复）
+        for cid in list(self.nodes.keys()):
+            if cid not in emitted:
+                walk(cid)
+        return out
+
+    @property
+    def loaded_replies(self) -> int:
+        return sum(len(v) for v in self.children.values())
+
+    def missing_summary(self) -> list[tuple[str, int]]:
+        """官方声明还有更多回复、但没能拉完的线程。"""
+        return [(cid, self.reply_totals.get(cid, 0)) for cid in self.pending_threads]
+
+    def incomplete_threads(self) -> list[tuple[str, int, int]]:
+        """(cid, 已加载, 官方总数)：已加载 < 官方总数的线程。"""
+        rows = []
+        for cid, total in self.reply_totals.items():
+            loaded = len(self.children.get(cid, []))
+            if loaded < total:
+                rows.append((cid, loaded, total))
+        return sorted(rows, key=lambda r: r[1] - r[2])
+
+
+# 找出当前视口内所有"展开N条回复 / 展开更多 / 点击加载更多"按钮，返回元素集合。
+#
+# 注意：这些控件虽然都是 <button>，但页面里的 element.click() 是无效的
+# （抖音绑定的不是普通 click 语义），必须由 Playwright 派发真实鼠标事件才能展开。
+# 另外只取"当前视口内"的按钮，避免一次性并发几百个请求被风控。
+_VISIBLE_EXPAND_BUTTONS_JS = r"""
+() => {
+    const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const isExpand = (t) => {
+        if (!t) return false;
+        if (t.includes('收起') || t.includes('全文')) return false;
+        return /^展开\s*\d+\s*条回复$/.test(t)
+            || /^展开更多$/.test(t)
+            || /^点击加载更多$/.test(t);
+    };
+    const vh = window.innerHeight || 900;
+    const out = [];
+    for (const btn of Array.from(document.querySelectorAll('button'))) {
+        const text = norm(btn.textContent);
+        if (!isExpand(text)) continue;
+        const rect = btn.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        if (rect.top < -4 || rect.top > vh - 4) continue;   // 只点视口内的
+        out.push(btn);
+    }
+    return out;
+}
+"""
+
+# 不限制视口：任意一个「展开N条回复」按钮即可（只为触发一次回复接口拿 URL 模板）
+_ANY_EXPAND_BUTTON_JS = r"""
+() => {
+    const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const isExpand = (t) => t && !t.includes('收起') && !t.includes('全文')
+        && (/^展开\s*\d+\s*条回复$/.test(t) || /^展开更多$/.test(t));
+    const out = [];
+    for (const btn of Array.from(document.querySelectorAll('button'))) {
+        if (isExpand(norm(btn.textContent))) out.push(btn);
+    }
+    return out;
+}
+"""
+
+# 直接用页面上下文 fetch 复刻评论接口，按 cursor 翻页直到 has_more=0。
+# 只要把页面自己发出的 URL 当作模板（带 a_bogus / msToken），
+# 仅修改 cursor / count / comment_id 服务端依然照常返回 —— 比驱动 UI 快得多也完整得多。
+_CRAWL_COMMENTS_JS = r"""
+async ([mode, tpl, opts]) => {
+    const count = opts.count || 50;
+    const maxPages = opts.maxPages || 60;
+    const seen = new Map();
+    const pages = [];
+    let cursor = 0;
+    let total = null;
+    let lastStatus = null;
+    let lastHasMore = null;
+    for (let i = 0; i < maxPages; i++) {
+        const u = new URL(tpl, location.origin);
+        if (mode === 'reply') {
+            if (opts.cid) u.searchParams.set('comment_id', opts.cid);
+            if (opts.itemId) u.searchParams.set('item_id', opts.itemId);
+        }
+        u.searchParams.set('cursor', String(cursor));
+        u.searchParams.set('count', String(count));
+        let j;
+        try {
+            const r = await fetch(u.toString(), { credentials: 'include' });
+            j = await r.json();
+        } catch (e) {
+            pages.push({ cursor, error: String(e) });
+            break;
+        }
+        lastStatus = j.status_code;
+        const cs = j.comments || [];
+        if (total === null) total = j.total;
+        for (const c of cs) {
+            if (!c.cid || seen.has(c.cid)) continue;
+            seen.set(c.cid, {
+                cid: c.cid,
+                text: c.text || '',
+                nick: ((c.user || {}).nickname || ''),
+                replies: c.reply_comment_total || 0,
+            });
+        }
+        const hasMore = j.has_more;
+        lastHasMore = hasMore;
+        pages.push({ cursor, n: cs.length, has_more: hasMore, status_code: lastStatus });
+        if (lastStatus !== 0 || !hasMore || cs.length === 0) break;
+        const nc = j.cursor;
+        cursor = (typeof nc === 'number' && nc > cursor) ? nc : cursor + count;
+        await new Promise(r => setTimeout(r, 180));
+    }
+    return { total, status_code: lastStatus, has_more: lastHasMore, pages, list: [...seen.values()] };
+}
+"""
 
 
 class DouyinScraper(BaseScraper):
@@ -25,9 +284,13 @@ class DouyinScraper(BaseScraper):
     async def scrape(self, url: str) -> dict:
         context = await self.new_context()
         page = await context.new_page()
+        collector = DouyinCommentApiCollector()
 
         try:
             page.on("dialog", lambda d: asyncio.ensure_future(d.dismiss()))
+            # 拦截评论接口：主楼 + 回复的真实数据从这里拿，DOM 抽取只作兜底
+            page.on("request", lambda r: collector.note_request(r.url))
+            page.on("response", lambda r: asyncio.ensure_future(collector.add_response(r)))
             self._setup_video_capture(page)
             await self._install_media_pause_guard(page)
             await page.goto(url, timeout=30000, wait_until="domcontentloaded")
@@ -83,10 +346,43 @@ class DouyinScraper(BaseScraper):
             expected_count = await self._get_expected_comment_count(page)
             if expected_count:
                 logger.info(f"[douyin] Expected comment count: {expected_count}")
-            await self._scroll_to_load_all(page, expected_count=expected_count)
-            await asyncio.sleep(2)
-            await self._expand_all_replies(page)
-            comments = await self._extract_all_comments(page, expected_count=expected_count)
+
+            # 首选：直接按 cursor 调评论接口翻页（快且完整，不受虚拟列表/点击限制）
+            api_ok = False
+            try:
+                api_ok = await self._crawl_comments_via_api(
+                    page, collector, self._extract_video_id(page.url or url)
+                )
+            except Exception as e:
+                logger.warning(f"[douyin] 接口直连异常，回退 UI 抓取: {e}")
+
+            # 兜底：滚动 + 点开所有「展开更多」，评论从拦截到的接口响应里取
+            if not api_ok:
+                await self._scroll_to_load_all(page, expected_count=expected_count)
+                await asyncio.sleep(2)
+                await self._expand_all_replies(
+                    page, collector=collector, expected_count=expected_count
+                )
+                await asyncio.sleep(1)
+
+            comments = collector.to_comments()
+            logger.info(
+                f"[douyin] 接口评论: {len(comments)} 条 "
+                f"(主楼 {len(collector.top_order)} + 回复 {collector.loaded_replies})"
+            )
+
+            if not comments:
+                comments = await self._extract_all_comments(page, expected_count=expected_count)
+                logger.info(f"[douyin] DOM 抽取兜底: {len(comments)} 条")
+
+            if collector.reply_totals:
+                reachable = len(collector.top_order) + sum(collector.reply_totals.values())
+                logger.info(
+                    f"[douyin] 可达上限估算 = 主楼 {len(collector.top_order)} + "
+                    f"全部回复 {sum(collector.reply_totals.values())} = {reachable} "
+                    f"(页面显示 {expected_count or '?'})"
+                )
+
             logger.info(f"[douyin] Total comments extracted: {len(comments)}")
 
             debug_dir = config.OUTPUT_DIR / "debug"
@@ -212,86 +508,241 @@ class DouyinScraper(BaseScraper):
             prev_items = max(prev_items, current_items)
             await asyncio.sleep(1.2)
 
-    async def _expand_all_replies(self, page):
+    async def _capture_reply_url_template(self, page, collector) -> bool:
+        """点开任意一个「展开N条回复」按钮，捕获回复接口 URL 模板（带签名）。
+
+        回复接口的 URL 没法靠主楼 URL 改路径造出来（实测会一直挂住），
+        但用它自己的签名去换 comment_id / cursor 是可行的，所以只需要触发一次。
+        """
+        for _ in range(10):
+            try:
+                handles = await page.evaluate_handle(_ANY_EXPAND_BUTTON_JS)
+                count = await handles.evaluate("(arr) => arr.length")
+            except Exception:
+                return False
+            if count:
+                try:
+                    handle = await handles.evaluate_handle("(arr) => arr[0]")
+                    element = handle.as_element()
+                    if element is not None:
+                        await element.click(force=True, timeout=5000)
+                        await self._wait_api_settle(collector, timeout=5.0)
+                except Exception:
+                    pass
+                if collector.api_urls.get("reply"):
+                    logger.info("[douyin] 已捕获回复接口 URL 模板")
+                    return True
+                return False
+            if not await self._scroll_comment_container_relative(page, 700):
+                break
+            await asyncio.sleep(0.6)
+        return False
+
+    async def _crawl_comments_via_api(self, page, collector, video_id: str) -> bool:
+        """直接用评论接口翻页抓全量评论（主楼 + 回复）。成功返回 True。"""
+        list_tpl = collector.api_urls.get("list")
+        if not list_tpl:
+            logger.warning("[douyin] 未捕获到评论接口 URL，回退 UI 抓取")
+            return False
+
+        query = parse_qs(urlparse(list_tpl).query)
+        video_id = (query.get("aweme_id") or [""])[0] or video_id
+
+        top = await page.evaluate(
+            _CRAWL_COMMENTS_JS, ["list", list_tpl, {"count": 50, "maxPages": 60}]
+        )
+        if top.get("status_code") != 0 or not top.get("list"):
+            logger.warning(
+                f"[douyin] 主楼接口直连失败 (status={top.get('status_code')})，回退 UI 抓取"
+            )
+            return False
+
+        collector.absorb_top(top["list"])
+        logger.info(
+            f"[douyin] 主楼接口直连: {len(top['list'])} 条 "
+            f"({len(top.get('pages') or [])} 页, 官方 total={top.get('total')})"
+        )
+
+        threads = [c for c in top["list"] if c.get("replies")]
+        if not threads:
+            return True
+
+        if not collector.api_urls.get("reply"):
+            await self._capture_reply_url_template(page, collector)
+        reply_tpl = collector.api_urls.get("reply")
+        if not reply_tpl:
+            logger.warning("[douyin] 未捕获到回复接口 URL，改由 UI 展开补回复")
+            await self._expand_all_replies(page, collector=collector, expected_count=None)
+            return True
+
+        loaded_threads = 0
+        loaded_replies = 0
+        for item in threads:
+            try:
+                res = await page.evaluate(
+                    _CRAWL_COMMENTS_JS,
+                    ["reply", reply_tpl, {"cid": item["cid"], "itemId": video_id,
+                                          "count": 50, "maxPages": 60}],
+                )
+            except Exception as e:
+                logger.warning(f"[douyin] 回复直连异常 cid={item['cid']}: {e}")
+                continue
+            if res.get("status_code") == 0 and res.get("list") is not None:
+                collector.absorb_replies(item["cid"], res["list"], bool(res.get("has_more")))
+                loaded_threads += 1
+                loaded_replies += len(res["list"])
+            else:
+                logger.warning(
+                    f"[douyin] 回复直连失败 cid={item['cid']} status={res.get('status_code')}"
+                )
+            await asyncio.sleep(0.15)
+
+        for item in threads:
+            collector.reply_totals.setdefault(item["cid"], int(item.get("replies") or 0))
+
+        logger.info(
+            f"[douyin] 回复接口直连: {loaded_threads}/{len(threads)} 个线程, "
+            f"{loaded_replies} 条回复 (官方声明共 {sum(collector.reply_totals.values())} 条)"
+        )
+        return True
+
+    async def _count_comment_items(self, page) -> int:
+        try:
+            return await page.evaluate(
+                "() => document.querySelectorAll('[data-e2e=\"comment-item\"]').length"
+            )
+        except Exception:
+            return 0
+
+    async def _wait_api_settle(self, collector, timeout: float = 6.0) -> None:
+        """等评论接口不再有新请求（或超时）。"""
+        if collector is None:
+            await asyncio.sleep(1.5)
+            return
+        deadline = time.monotonic() + timeout
+        last = -1
+        stable = 0
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.3)
+            cur = collector.page_count + collector.pending_requests
+            if cur == last:
+                stable += 1
+                if stable >= 2:
+                    return
+            else:
+                stable = 0
+                last = cur
+
+    async def _click_visible_expand_buttons(self, page) -> int:
+        """点击当前视口内所有「展开N条回复 / 展开更多」按钮，返回成功点击次数。
+
+        必须用 Playwright 的真实鼠标事件：页面内 element.click() 对抖音这些
+        控件无效（实测点击 60 轮、每轮 61 个按钮，一个回复都没展开）。
+        """
+        try:
+            handles = await page.evaluate_handle(_VISIBLE_EXPAND_BUTTONS_JS)
+            count = await handles.evaluate("(arr) => arr.length")
+        except Exception:
+            return 0
+
+        clicked = 0
+        for i in range(count):
+            try:
+                handle = await handles.evaluate_handle(f"(arr) => arr[{i}]")
+                element = handle.as_element()
+                if element is None:
+                    continue
+                await element.click(force=True, timeout=3000)
+                clicked += 1
+                await asyncio.sleep(0.5)
+            except Exception:
+                continue
+        return clicked
+
+    async def _expand_all_replies(self, page, collector=None, expected_count: int | None = None):
+        """展开全部「展开N条回复 / 展开更多」，直到列表里再无展开控件。
+
+        关键修复：旧实现用 (按钮文案 + 昵称) 作为"已点击"去重键，导致同一条主评论
+        下重复出现的「展开更多」被判定为"已点过"直接跳过 —— 每个回复线程只翻到第
+        1~2 页就停了（接口 has_more=1 但再没人去点）。
+        现在改为纯进度驱动：不记录"点过谁"，只要当前视口还有展开控件就继续点，
+        点击成功后抖音自己的按钮形态会变（展开N条回复 -> 展开更多 -> 收起/消失），
+        天然收敛。
+        """
         total_clicked = 0
+        passes = 0
 
-        # Initialize a global Set to track clicked buttons.
-        # React re-renders destroy dataset attributes, so we use a persistent Set.
-        await page.evaluate("() => { if (!window.__clickedExpandBtns) window.__clickedExpandBtns = new Set(); }")
-
-        # Scroll comment container back to top first.
-        await self._scroll_comment_container(page, 0)
-        await asyncio.sleep(1)
-
-        # Strategy: scroll through the container top-to-bottom, clicking all visible
-        # expand buttons at each position. After reaching the bottom, scroll back to top
-        # and repeat — new "展开更多" buttons appear inside just-expanded replies.
-        # Stop when a full top-to-bottom pass clicks zero new buttons.
-        for full_pass in range(5):
+        for full_pass in range(8):
+            passes = full_pass + 1
             await self._scroll_comment_container(page, 0)
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.0)
             pass_clicked = 0
+            prev_items = await self._count_comment_items(page)
 
-            for scroll_round in range(60):
-                # At current position, click all visible buttons, re-scan until stable
-                for rescan in range(10):
-                    btns = page.locator('button:has-text("展开"):not(:has-text("收起")):not(:has-text("全文"))')
-                    count = await btns.count()
-
-                    clicked_this_scan = 0
-                    for i in range(count):
-                        btn = btns.nth(i)
-                        try:
-                            text = (await btn.text_content(timeout=2000) or '').strip()
-                        except Exception:
-                            continue
-                        if not text or ('条回复' not in text and '更多' not in text):
-                            continue
-                        try:
-                            if not await btn.is_visible(timeout=2000):
-                                continue
-                        except Exception:
-                            continue
-
-                        parent_nick = await btn.evaluate("""
-                            (el) => {
-                                const parent = el.closest('[data-e2e="comment-item"]');
-                                return parent ? (parent.querySelector('[data-click-from="title"]') || {}).textContent || '' : '';
-                            }
-                        """)
-                        btn_id = text + '::' + parent_nick.strip()
-                        if await page.evaluate("(id) => window.__clickedExpandBtns.has(id)", btn_id):
-                            continue
-
-                        try:
-                            await page.evaluate("(id) => { window.__clickedExpandBtns.add(id); }", btn_id)
-                            await btn.click(force=True, timeout=3000)
-                            clicked_this_scan += 1
-                            pass_clicked += 1
-                            total_clicked += 1
-                            logger.info(f"[douyin] Clicked expand: '{text}'")
-                            await asyncio.sleep(1.5)
-                        except Exception:
-                            continue
-
-                    if clicked_this_scan == 0:
+            # 一趟 = 从列表顶部一路滚到底，边走边点。
+            # 注意：中间"没有展开控件"的区段非常常见（已展开过的线程），
+            # 绝不能因为某一屏没点着东西就提前结束这一趟 —— 必须滚到底为止。
+            for _ in range(600):
+                # 在当前屏反复点，直到这一屏再没有展开控件
+                round_clicked = 0
+                for _ in range(25):
+                    n = await self._click_visible_expand_buttons(page)
+                    if n == 0:
                         break
-                    await asyncio.sleep(1)
+                    round_clicked += n
+                    pass_clicked += n
+                    total_clicked += n
+                    await self._wait_api_settle(collector, timeout=6.0)
 
-                # Scroll down one viewport
-                scrolled = await self._scroll_comment_container_relative(page, 800)
-                if not scrolled:
+                prev_items = max(prev_items, await self._count_comment_items(page))
+
+                # 滚不动了 = 到列表底部。本屏如果刚点开过东西（列表被顶长），
+                # 就再给一轮机会，直到"滚不动 + 没点着"才算这一趟结束。
+                moved = await self._scroll_comment_container_relative(page, 600)
+                if not moved and round_clicked == 0:
                     break
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.3)
 
-            logger.info(f"[douyin] Pass {full_pass+1}: clicked {pass_clicked} buttons")
+            logger.info(
+                f"[douyin] Pass {passes}: clicked {pass_clicked} buttons, "
+                f"dom_items={prev_items}"
+                + (
+                    f", api_loaded={collector.page_count} pages"
+                    f" (top={len(collector.top_order)}, replies={collector.loaded_replies})"
+                    if collector is not None else ""
+                )
+            )
             if pass_clicked == 0:
-                break  # No new buttons in this full pass — done
+                break
 
-        if total_clicked > 0:
-            logger.info(f"[douyin] Expanded {total_clicked} reply sections")
+        logger.info(f"[douyin] Expanded {total_clicked} reply sections (total clicks)")
 
-    async def _extract_all_comments(self, page, expected_count: int | None = None) -> list[tuple[str, str]]:
+        if collector is not None:
+            missing = collector.missing_summary()
+            if missing:
+                logger.warning(
+                    f"[douyin] {len(missing)} 个回复线程 has_more=1 未拉完: "
+                    + ", ".join(f"{cid}({total})" for cid, total in missing[:10])
+                )
+            incomplete = collector.incomplete_threads()
+            if incomplete:
+                logger.warning(
+                    f"[douyin] {len(incomplete)} 个回复线程没展开干净 (已加载/官方): "
+                    + ", ".join(f"{cid}({got}/{tot})" for cid, got, tot in incomplete[:10])
+                )
+            else:
+                logger.info("[douyin] 所有有回复的主楼线程都已展开完整")
+            if expected_count:
+                logger.info(
+                    f"[douyin] 接口已抓取 {len(collector.nodes)} 条 / 页面显示 {expected_count} 条"
+                )
+
+    async def _extract_all_comments(
+        self,
+        page,
+        expected_count: int | None = None,
+        max_scrolls: int = 150,
+    ) -> list[tuple[str, str]]:
         await page.evaluate(f"""
             () => {{
                 const getContainer = () => {{
@@ -321,7 +772,6 @@ class DouyinScraper(BaseScraper):
 
         all_comments = []
         seen = set()
-        max_scrolls = 150
         stuck_count = 0
 
         # Override CSS line-clamp so innerText returns full text

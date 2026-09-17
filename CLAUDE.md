@@ -54,7 +54,7 @@ python main.py --input path/to/custom.xlsx    # custom input
 - `scrape(url)` → `list[tuple[str, str]]` of `(nickname, comment_text)`
 
 ### Platform-Specific Strategies
-- **Douyin**: DOM extraction with `[data-e2e="comment-item"]` selectors, coordinate-based reply expansion
+- **Douyin**: comment API first — replay the page-issued `/aweme/v1/web/comment/list/` and `.../list/reply/` requests (reusing their `a_bogus`/`msToken` signature) and page through by `cursor` with `count=50`. Falls back to scrolling + clicking 展开N条回复/展开更多 (real Playwright clicks only — in-page `element.click()` is a no-op here), then reads comments from the intercepted JSON. Note: the page's displayed comment counter is inflated — the real ceiling is (all top-level) + (each comment's `reply_comment_total`).
 - **Xiaohongshu**: Persistent browser context, interleaved scroll-and-expand cycles
 - **Toutiao**: Comment panel button click, multi-strategy DOM extraction
 - **Weibo**: API response interception (buildComments endpoint), pagination via max_id

@@ -18,3 +18,9 @@ tests/
 
 # WorkBuddy tool state
 .workbuddy/
+
+# 构建环境（rebuild 评论抓取工具.exe 用）
+.build_venv/
+
+# 构建/测试日志产物
+*.log
