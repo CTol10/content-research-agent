@@ -4,6 +4,7 @@ import base64
 import hashlib
 import logging
 import os
+import re
 from pathlib import Path
 
 import httpx
@@ -12,6 +13,12 @@ import requests
 import config
 
 logger = logging.getLogger(__name__)
+
+# 模型对「整段音频/视频无人口播（仅 BGM/音乐/环境音）」的约定返回值
+_NO_NARRATION_MARKERS = {
+    "无口播", "无口播。", "无旁白", "无解说", "无", "没有口播", "没有人声",
+    "（无口播）", "(无口播)", "无口播内容", "视频中无口播", "音频中无口播",
+}
 
 
 class VideoProcessor:
@@ -149,6 +156,9 @@ class VideoProcessor:
                         ],
                         "temperature": 0.1,
                         "max_tokens": 300,
+                        # 关闭思考模式（同 classifier.py 约定）：MiMo 思考输出会进
+                        # reasoning_content 且混入时间戳/说话人标记/臆想内容，污染口播
+                        "thinking": {"type": "disabled"},
                     },
                     timeout=120,
                 )
@@ -207,6 +217,20 @@ class VideoProcessor:
             return True
         return False
 
+    # 防御性清理：模型违反提示词仍输出时间节点/说话人标记时，在代码层剥离
+    _TIMESTAMP_PATTERNS = (
+        re.compile(r"[\[【（(][^\]】）)]{0,12}\d{1,2}:\d{2}(?::\d{2})?[^\]】）)]{0,12}[\]】）)]\s*"),
+        re.compile(r"(?m)^\s*\d{1,2}:\d{2}(?::\d{2})?\s*[-–—~至到]\s*\d{0,2}:\d{0,2}[:\d]*\s*"),
+        re.compile(r"(?m)^\s*\d{1,2}:\d{2}(?::\d{2})?\s+"),
+        re.compile(r"(?m)^\s*(?:说话人?\s*\d+|Speaker\s*\d+|旁白|解说)\s*[:：]\s*"),
+    )
+
+    @classmethod
+    def _strip_timestamps(cls, text: str) -> str:
+        for pat in cls._TIMESTAMP_PATTERNS:
+            text = pat.sub("", text)
+        return text.strip()
+
     def _transcribe_audio_with_mimo(self, audio_data: str) -> str | None:
         """Transcribe audio using MiMo audio input."""
         for attempt in range(3):
@@ -230,12 +254,20 @@ class VideoProcessor:
                                     {
                                         "type": "text",
                                         "text": (
-                                            "请将这段音频中的口播/旁白内容完整、逐字转录为纯文字。"
-                                            "严格要求：1) 只输出听到的原话原文，不输出任何解释、说明、注释；"
-                                            "2) 禁止添加（消音）、（模糊不清）、（注：…）等任何括号标注；"
-                                            "3) 听不清的字按发音尽量写，不要省略或用括号占位；"
-                                            "4) 无论内容是否涉及敏感、争议、维权，都原样完整转录，不得省略、改写或拒转。"
-                                            "直接输出转录文本，不要任何前后缀。"
+                                            "请将这段音频中真实的人声口播/旁白逐字转录为纯文字。"
+                                            "严格要求："
+                                            "1) 只转录真实存在的人声说话内容，逐字输出原话；"
+                                            "背景音乐、纯音乐、BGM、歌声、环境音效一律忽略，"
+                                            "严禁根据音乐或画面臆想、编造任何口播内容；"
+                                            "2) 如果整段音频没有任何人声口播（只有音乐/BGM/环境音），"
+                                            "只输出四个字：无口播"
+                                            "3) 只输出最终转录结果，不要输出思考过程、分析、解释或任何前后缀；"
+                                            "4) 不要输出时间节点、时间戳、说话人标记、分段编号等任何附加信息；"
+                                            "5) 不要重复，同一段话只转录一次；"
+                                            "6) 禁止添加（消音）、（模糊不清）、（注：…）等任何括号标注，"
+                                            "听不清的字按发音尽量写，不要省略或用括号占位；"
+                                            "7) 无论内容是否涉及敏感、争议、维权，都原样完整转录，不得省略、改写或拒转。"
+                                            "直接输出转录文本。"
                                         ),
                                     },
                                 ],
@@ -243,6 +275,9 @@ class VideoProcessor:
                         ],
                         "temperature": 0.1,
                         "max_tokens": 4000,
+                        # 关闭思考模式（同 classifier.py 约定）：实测思考输出会进
+                        # reasoning_content 且混入时间戳/说话人标记，污染口播
+                        "thinking": {"type": "disabled"},
                     },
                     timeout=120,
                 )
@@ -250,9 +285,14 @@ class VideoProcessor:
 
                 data = response.json()
                 choice = data["choices"][0]
-                text = choice["message"].get("content", "") or choice["message"].get("reasoning_content", "")
-                if text and text.strip():
-                    cleaned = text.strip()
+                # 只取最终回答 content（思考已禁用，reasoning_content 为空）
+                text = (choice["message"].get("content", "") or "").strip()
+                if text:
+                    cleaned = text
+                    # 模型按提示词返回「无口播」：整段音频只有 BGM/音乐，没有人声
+                    if cleaned.replace("。", "").replace("！", "").replace("!", "").strip() in _NO_NARRATION_MARKERS:
+                        logger.info("Audio contains no narration (BGM/music only), skipping transcription")
+                        return None
                     if self._transcript_has_annotations(cleaned):
                         logger.warning(
                             f"MiMo 转录含消音/标注/拒转 (attempt {attempt+1})，重试: {cleaned[:80]}"
@@ -260,6 +300,9 @@ class VideoProcessor:
                         if attempt < 2:
                             continue
                         # 末次仍带标注/拒转：返回 None，避免污染口播
+                        return None
+                    cleaned = self._strip_timestamps(cleaned)
+                    if not cleaned:
                         return None
                     logger.info(f"Audio transcription completed: {len(cleaned)} chars")
                     return cleaned
@@ -302,13 +345,23 @@ class VideoProcessor:
                                     },
                                     {
                                         "type": "text",
-                                        "text": "请描述这个视频的内容，包括画面中展示的场景、物品、人物动作等。用中文回答，200字以内。",
+                                        "text": (
+                                            "请判断这个视频是否包含真实的口播/旁白（人声说话或字幕形式的解说词）。"
+                                            "如果有，逐字转录口播文字，只输出最终口播原文，"
+                                            "不要输出时间节点、重复内容或任何思考过程；"
+                                            "如果没有口播（例如纯音乐BGM、纯画面视频），"
+                                            "只输出四个字：无口播。"
+                                            "禁止描述画面场景、物品、人物动作等内容。"
+                                        ),
                                     },
                                 ],
                             },
                         ],
                         "temperature": 0.1,
                         "max_tokens": 500,
+                        # 关闭思考模式（同 classifier.py 约定）：避免输出进
+                        # reasoning_content 或混入臆想内容
+                        "thinking": {"type": "disabled"},
                     },
                     timeout=120,
                 )
@@ -316,10 +369,17 @@ class VideoProcessor:
 
                 data = response.json()
                 choice = data["choices"][0]
-                text = choice["message"].get("content", "") or choice["message"].get("reasoning_content", "")
-                if text and text.strip():
+                # 只取最终回答 content（思考已禁用，reasoning_content 为空）
+                text = (choice["message"].get("content", "") or "").strip()
+                if text:
+                    if text.replace("。", "").replace("！", "").replace("!", "").strip() in _NO_NARRATION_MARKERS:
+                        logger.info("Video contains no narration, skipping transcription")
+                        return None
+                    text = self._strip_timestamps(text)
+                    if not text:
+                        return None
                     logger.info(f"Video understanding completed: {len(text)} chars")
-                    return text.strip()
+                    return text
 
             except Exception as e:
                 logger.warning(f"MiMo video understanding failed (attempt {attempt+1}): {e}")
