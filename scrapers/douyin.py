@@ -13,6 +13,11 @@ SCROLL_CONTAINER = 'main.ICt0G60V'
 # 抖音评论接口（主楼列表 / 回复列表）
 COMMENT_API_MARK = "/aweme/v1/web/comment/list"
 
+# 抖音视频详情接口：页面加载视频时自发请求，响应含 play_addr（可直接下载的
+# 视频地址）。视频播放被暂停防自动播放后 MSE 分片不会请求，网络/DOM 捕获
+# 拿不到视频地址，口播转录必须走这里兜底。
+DETAIL_API_MARK = "/aweme/v1/web/aweme/detail/"
+
 
 class NoCommentsError(Exception):
     """Raised when a video has no comments."""
@@ -291,6 +296,21 @@ class DouyinScraper(BaseScraper):
             # 拦截评论接口：主楼 + 回复的真实数据从这里拿，DOM 抽取只作兜底
             page.on("request", lambda r: collector.note_request(r.url))
             page.on("response", lambda r: asyncio.ensure_future(collector.add_response(r)))
+            # 拦截视频详情接口：响应里的 play_addr 是口播转录的视频来源
+            detail_holder: dict = {}
+
+            async def _capture_detail(response):
+                if DETAIL_API_MARK not in response.url:
+                    return
+                try:
+                    data = await response.json()
+                    if isinstance(data, dict) and data.get("aweme_detail"):
+                        detail_holder["data"] = data["aweme_detail"]
+                        logger.info("[douyin] 已捕获视频详情接口响应（含 play_addr）")
+                except Exception:
+                    pass  # 非 JSON / 提前关闭的响应，忽略
+
+            page.on("response", lambda r: asyncio.ensure_future(_capture_detail(r)))
             self._setup_video_capture(page)
             await self._install_media_pause_guard(page)
             await page.goto(url, timeout=30000, wait_until="domcontentloaded")
@@ -393,6 +413,18 @@ class DouyinScraper(BaseScraper):
             # Only return video_url for actual video posts
             video_url = None if is_image_post else self._get_primary_video_url()
             audio_url = None if is_image_post else self._get_primary_audio_url()
+
+            # 兜底：播放被暂停时 MSE 分片不会请求，网络/DOM 捕获拿不到视频；
+            # 从详情接口响应解析 play_addr（302 跳转到 douyinvod CDN）。
+            if not video_url and not is_image_post:
+                video_url = self._extract_play_addr(detail_holder.get("data"))
+                if video_url:
+                    logger.info(f"[douyin] 从详情接口兜底获取视频地址: {video_url[:80]}")
+                else:
+                    logger.warning(
+                        "[douyin] 未捕获到视频地址（网络捕获/DOM/详情接口均无），口播将为空"
+                    )
+
             return {"post_content": post_content, "comments": comments, "video_url": video_url, "audio_url": audio_url}
 
         except Exception as e:
@@ -1213,6 +1245,23 @@ class DouyinScraper(BaseScraper):
             logger.info(f"[douyin] Clicked video at ({video_info['x']}, {video_info['y']}) to pause")
             await asyncio.sleep(0.5)
             await self._pause_all_media(page)
+
+    @staticmethod
+    def _extract_play_addr(aweme_detail: dict | None) -> str | None:
+        """从视频详情接口响应解析可直接下载的播放地址。
+
+        优先级：play_addr（无水印）> download_addr（有水印）。
+        url_list[0] 通常是 /aweme/v1/play/ 短链，会 302 到 douyinvod CDN。
+        """
+        if not isinstance(aweme_detail, dict):
+            return None
+        video = aweme_detail.get("video") or {}
+        for key in ("play_addr", "play_addr_lowbr", "download_addr"):
+            addr = video.get(key) or {}
+            urls = [u for u in (addr.get("url_list") or []) if isinstance(u, str) and u.startswith("http")]
+            if urls:
+                return urls[0]
+        return None
 
     @staticmethod
     def _extract_video_id(raw_url: str) -> str:

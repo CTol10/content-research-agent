@@ -19,6 +19,14 @@ for _pattern in ["**/*.yaml", "**/*.onnx"]:
         _rel = _src_path.relative_to(_RAPIDOCR_PKG.parent)
         _rapidocr_datas.append((str(_src_path), str(_rel.parent)))
 
+# ── 显式捆绑 imageio_ffmpeg 的 ffmpeg 二进制 ──
+# 口播链路（抽音频 / DASH 转码）强依赖 ffmpeg。hooks-contrib 理论上会自动
+# 收集，但缺失时口播会静默失败，这里显式加入以确保 exe 内可用。
+# 目标路径必须保持 imageio_ffmpeg/binaries：<basename>，
+# 冻结运行时 get_ffmpeg_exe() 通过 importlib.resources 定位的就是这个目录。
+import imageio_ffmpeg as _iif
+_ffmpeg_datas = [(str(_iif.get_ffmpeg_exe()), "imageio_ffmpeg/binaries")]
+
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -29,7 +37,7 @@ a = Analysis(
         # 用户重新校准后会以同目录文件覆盖（内置默认不重复覆盖）。
         ('config.wechat_pc_417.json', '.'),
         ('input', 'input'),
-    ] + _rapidocr_datas,
+    ] + _rapidocr_datas + _ffmpeg_datas,
     hiddenimports=[
         'classifier',
         'config',

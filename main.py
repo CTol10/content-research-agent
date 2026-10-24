@@ -825,10 +825,24 @@ async def scrape_all(input_file, platforms_filter=None, resume=False, batch_size
     if process_video:
         from video_processor import VideoProcessor
         if not config.MIMO_API_KEY:
-            print("\n[警告] 未设置 MIMO_API_KEY，视频处理将被跳过。")
+            print("\n" + "=" * 60)
+            print("[警告] 未设置 MIMO_API_KEY，口播转录与视频分析将被跳过！")
+            print("  结果中将只有「正文」，没有「口播」部分。")
+            print("  配置方法：在 exe 同目录放置 config.ini（参考 config.ini.example），")
+            print("  内容为：MIMO_API_KEY=你的key")
+            print("=" * 60 + "\n")
+            logger.warning("MIMO_API_KEY not set — narration transcription and video analysis will be SKIPPED")
             process_video = False
         else:
             video_processor = VideoProcessor()
+            # 预检 ffmpeg 可用性：口播链路（抽音频/转码）强依赖 ffmpeg，
+            # 缺失时提前给出明确报错，避免运行中静默失败。
+            ffmpeg_path = video_processor.get_ffmpeg_path()
+            if ffmpeg_path:
+                logger.info(f"ffmpeg available: {ffmpeg_path}")
+            else:
+                print("\n[警告] ffmpeg 不可用（imageio_ffmpeg），口播转录将失败！\n")
+                logger.error("ffmpeg unavailable — narration transcription will fail")
 
     # Collect video URLs for inspection
     video_urls_log = []

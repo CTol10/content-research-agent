@@ -26,36 +26,86 @@ class VideoProcessor:
         self.temp_dir = config.VIDEO_TEMP_DIR
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.last_audio_base64 = None  # audio base64 from last process_video call
+        self._ffmpeg_exe: str | None = None
+        try:
+            import imageio_ffmpeg
+            self._ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception as e:
+            logger.error(f"ffmpeg not available (imageio_ffmpeg): {e}")
+
+    @staticmethod
+    def get_ffmpeg_path() -> str | None:
+        """Resolve the bundled ffmpeg executable. Returns None if unavailable.
+
+        口播链路（抽音频 / DASH 转码）强依赖 ffmpeg；打包成 exe 后若
+        imageio_ffmpeg 二进制未随包分发，这里会返回 None——必须在启动
+        预检时暴露，而不是运行中静默失败。
+        """
+        try:
+            import imageio_ffmpeg
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception as e:
+            logger.error(f"ffmpeg not available (imageio_ffmpeg): {e}")
+            return None
 
     def download_video(self, url: str, referer: str = None) -> str | None:
-        """Download video to temp directory. Returns file path or None on failure."""
+        """Download video to temp directory. Returns file path or None on failure.
+
+        依次尝试三种请求形态：原 Referer → 平台 Referer（douyin/xhs 等站内
+        短链要求）→ 无 Referer，提高 CDN 下载成功率。
+        """
         url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
         ext = ".mp4"
         for e in config.VIDEO_EXTENSIONS:
             if e in url.lower():
                 ext = e
                 break
+        if ext == ".m3u8":
+            # m3u8 是 HLS 播放列表清单，httpx 只能下载到几百字节的索引文件，
+            # 无法作为视频送转录——明确失败并记录，避免下游静默产出垃圾数据。
+            logger.warning(f"m3u8 stream URL not supported for download: {url[:80]}")
+            return None
         video_path = str(self.temp_dir / f"video_{url_hash}{ext}")
 
-        headers = {"User-Agent": config.DEFAULT_USER_AGENT}
-        if referer:
-            headers["Referer"] = referer
-        else:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            headers["Referer"] = f"{parsed.scheme}://{parsed.hostname}/"
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        fallback_referer = f"{parsed.scheme}://{parsed.hostname}/"
+        candidates = [{"Referer": referer}] if referer else [
+            {"Referer": fallback_referer},
+            {},
+            {"Referer": "https://www.douyin.com/"},
+        ]
 
+        for idx, extra_headers in enumerate(candidates):
+            headers = {"User-Agent": config.DEFAULT_USER_AGENT, **extra_headers}
+            result = self._download_to(url, video_path, headers)
+            if result:
+                return video_path
+            logger.info(f"Video download attempt {idx + 1}/{len(candidates)} failed, retrying with different headers")
+
+        logger.warning(f"Video download failed after {len(candidates)} attempts: {url[:80]}")
+        if os.path.exists(video_path):
+            os.unlink(video_path)
+        return None
+
+    def _download_to(self, url: str, video_path: str, headers: dict) -> bool:
+        """Single download attempt. Returns True on success."""
         try:
             with httpx.Client(timeout=config.VIDEO_DOWNLOAD_TIMEOUT, follow_redirects=True, headers=headers) as client:
                 with client.stream("GET", url) as response:
                     response.raise_for_status()
+
+                    content_type = response.headers.get("content-type", "")
+                    if "text/html" in content_type:
+                        logger.warning(f"Video URL returned HTML (likely blocked): {content_type}")
+                        return False
 
                     content_length = response.headers.get("content-length")
                     if content_length:
                         size_mb = int(content_length) / (1024 * 1024)
                         if size_mb > config.MAX_VIDEO_SIZE_MB:
                             logger.warning(f"Video too large: {size_mb:.1f}MB > {config.MAX_VIDEO_SIZE_MB}MB limit")
-                            return None
+                            return False
 
                     downloaded = 0
                     max_bytes = config.MAX_VIDEO_SIZE_MB * 1024 * 1024
@@ -66,17 +116,17 @@ class VideoProcessor:
                                 logger.warning(f"Video download exceeded size limit, aborting")
                                 f.close()
                                 os.unlink(video_path)
-                                return None
+                                return False
                             f.write(chunk)
 
             logger.info(f"Video downloaded: {video_path} ({downloaded / 1024 / 1024:.1f}MB)")
-            return video_path
+            return True
 
         except Exception as e:
             logger.warning(f"Video download failed: {e}")
             if os.path.exists(video_path):
                 os.unlink(video_path)
-            return None
+            return False
 
     def _video_to_base64(self, video_path: str) -> str | None:
         """Encode video file to base64 data URL. Returns None if too large."""
@@ -413,10 +463,12 @@ class VideoProcessor:
 
     def _extract_audio(self, video_path: str) -> str | None:
         """Extract audio track from video using ffmpeg. Returns audio file path or None."""
+        ffmpeg_exe = self._ffmpeg_exe or self.get_ffmpeg_path()
+        if not ffmpeg_exe:
+            logger.error("Audio extraction skipped: ffmpeg unavailable")
+            return None
         audio_path = video_path.rsplit(".", 1)[0] + "_audio.m4a"
         try:
-            import imageio_ffmpeg
-            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
             import subprocess
 
             # Try stream copy first (fast, no re-encoding)
@@ -526,8 +578,10 @@ class VideoProcessor:
         merged_path = video_path.replace(".mp4", "_merged.mp4")
 
         try:
-            import imageio_ffmpeg
-            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            ffmpeg_exe = self._ffmpeg_exe or self.get_ffmpeg_path()
+            if not ffmpeg_exe:
+                logger.error("Merge skipped: ffmpeg unavailable")
+                return None
 
             import subprocess
             cmd = [
